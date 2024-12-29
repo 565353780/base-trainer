@@ -264,6 +264,8 @@ class BaseTrainer(ABC):
 
         result_dict = self.model(data_dict)
 
+        result_dict = self.postProcessData(data_dict, result_dict, True)
+
         loss_dict = self.getLossDict(data_dict, result_dict)
 
         if 'Loss' in loss_dict.keys():
@@ -376,6 +378,8 @@ class BaseTrainer(ABC):
 
         result_dict = self.model.module(data_dict)
 
+        result_dict = self.postProcessData(data_dict, result_dict, False)
+
         loss_dict = self.getLossDict(data_dict, result_dict)
 
         ema_result_dict = self.ema_model(data_dict)
@@ -469,6 +473,14 @@ class BaseTrainer(ABC):
 
         self.sampleModelStep(self.ema_model, 'EMA')
         return True
+
+    def postProcessData(self, data_dict: dict, result_dict: dict, is_training: bool = True) -> dict:
+        '''
+        if is_training:
+            result_dict['new_name'] = new_value
+            return result_dict
+        '''
+        return result_dict
 
     def train(self) -> bool:
         final_step = self.step + self.finetune_step_num
