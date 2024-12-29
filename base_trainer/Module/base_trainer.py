@@ -428,8 +428,6 @@ class BaseTrainer(ABC):
             if self.local_rank == 0:
                 pbar.update(1)
 
-            break
-
         if self.local_rank == 0:
             pbar.close()
 
@@ -461,8 +459,6 @@ class BaseTrainer(ABC):
                     avg_loss_dict[key] = [item]
                 else:
                     avg_loss_dict[key].append(item)
-
-            break
 
         for key, item in avg_loss_dict.items():
             avg_item = np.mean(item)
