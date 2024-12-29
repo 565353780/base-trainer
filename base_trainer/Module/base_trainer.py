@@ -3,11 +3,12 @@ import torch
 import numpy as np
 import torch.distributed as dist
 from torch import nn
+from tqdm import tqdm
 from typing import Union
 from copy import deepcopy
-from tqdm import tqdm
 from abc import ABC, abstractmethod
 from torch.optim.adamw import AdamW
+from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
@@ -54,6 +55,7 @@ class BaseTrainer(ABC):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         use_dataloader_x: bool = False,
+        use_amp: bool = False,
     ) -> None:
         self.backend = 'nccl' if device != 'cpu' else 'gloo'
         self.local_rank = setup_distributed(self.backend)
@@ -77,6 +79,11 @@ class BaseTrainer(ABC):
         self.is_metric_lower_better = is_metric_lower_better
         self.sample_results_freq = sample_results_freq
         self.use_dataloader_x = use_dataloader_x
+        self.use_amp = use_amp
+
+        self.scaler = None
+        if self.use_amp:
+            self.scaler = GradScaler()
 
         self.step = 0
         self.epoch = 0
@@ -266,7 +273,11 @@ class BaseTrainer(ABC):
 
         result_dict = self.postProcessData(data_dict, result_dict, True)
 
-        loss_dict = self.getLossDict(data_dict, result_dict)
+        if self.use_amp:
+            with autocast('cuda'):
+                loss_dict = self.getLossDict(data_dict, result_dict)
+        else:
+            loss_dict = self.getLossDict(data_dict, result_dict)
 
         if 'Loss' not in loss_dict.keys():
             print('[ERROR][BaseTrainer::trainStep]')
@@ -277,7 +288,10 @@ class BaseTrainer(ABC):
 
         accum_loss = loss / self.accum_iter
 
-        accum_loss.backward()
+        if self.use_amp:
+            self.scaler.scale(accum_loss).backward()
+        else:
+            accum_loss.backward()
 
         if not check_and_replace_nan_in_grad(self.model):
             print('[ERROR][BaseTrainer::trainStep]')
@@ -285,8 +299,17 @@ class BaseTrainer(ABC):
             exit()
 
         if (self.step + 1) % self.accum_iter == 0:
+            if self.use_amp:
+                self.scaler.unscale_(self.optim)
+
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optim.step()
+
+            if self.use_amp:
+                self.scaler.step(self.optim)
+                self.scaler.update()
+            else:
+                self.optim.step()
+
             self.sched.step()
             if self.local_rank == 0:
                 self.ema()
