@@ -268,14 +268,12 @@ class BaseTrainer(ABC):
 
         loss_dict = self.getLossDict(data_dict, result_dict)
 
-        if 'Loss' in loss_dict.keys():
-            loss = loss_dict['Loss']
-        elif 'loss' in loss_dict.keys():
-            loss = loss_dict['loss']
-        else:
+        if 'Loss' not in loss_dict.keys():
             print('[ERROR][BaseTrainer::trainStep]')
             print('\t loss not found!')
             exit()
+
+        loss = loss_dict['Loss']
 
         accum_loss = loss / self.accum_iter
 
@@ -416,6 +414,7 @@ class BaseTrainer(ABC):
 
         print('[INFO][BaseTrainer::evalEpoch]')
         print('\t start evaluating ...')
+        pbar = tqdm(total=len(dataloader))
         for data_dict in dataloader:
             data_dict = self.preProcessData(data_dict, False)
 
@@ -426,6 +425,19 @@ class BaseTrainer(ABC):
                     avg_loss_dict[key] = [item]
                 else:
                     avg_loss_dict[key].append(item)
+
+            pbar.set_description(
+                "EPOCH %d LOSS %.6f LR %.4f"
+                % (
+                    self.epoch,
+                    eval_loss_dict["Loss"],
+                    self.getLr() / self.lr,
+                )
+            )
+
+            pbar.update(1)
+
+        pbar.close()
 
         for key, item in avg_loss_dict.items():
             avg_item = np.mean(item)
