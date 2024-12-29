@@ -88,6 +88,7 @@ class BaseTrainer(ABC):
         if self.local_rank == 0:
             self.logger = Logger()
 
+        self.dataloader_dict = {}
         if not self.createDatasets():
             print('[ERROR][BaseTrainer::__init__]')
             print('\t createDatasets failed!')
@@ -97,8 +98,6 @@ class BaseTrainer(ABC):
             DATALOADER = DataLoaderX
         else:
             DATALOADER = DataLoader
-
-        self.dataloader_dict: dict
         for key, item in self.dataloader_dict.items():
             if key == 'eval':
                 self.dataloader_dict[key]['dataloader'] = DATALOADER(
@@ -430,6 +429,8 @@ class BaseTrainer(ABC):
             if self.local_rank == 0:
                 pbar.update(1)
 
+            break
+
         if self.local_rank == 0:
             pbar.close()
 
@@ -462,17 +463,15 @@ class BaseTrainer(ABC):
                 else:
                     avg_loss_dict[key].append(item)
 
+            break
+
         for key, item in avg_loss_dict.items():
             avg_item = np.mean(item)
             self.logger.addScalar("Eval/" + key, avg_item, self.step)
 
-        if self.best_model_metric_name is not None:
-            if self.best_model_metric_name in avg_loss_dict.keys():
-                self.autoSaveModel(
-                    'best',
-                    avg_loss_dict[self.best_model_metric_name],
-                    self.is_metric_lower_better,
-                )
+            if self.best_model_metric_name is not None:
+                if key == self.best_model_metric_name:
+                    self.autoSaveModel('best', avg_item, self.is_metric_lower_better)
 
         return True
 
