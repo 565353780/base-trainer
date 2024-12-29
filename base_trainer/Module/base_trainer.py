@@ -236,6 +236,14 @@ class BaseTrainer(ABC):
             )
         return True
 
+    def preProcessData(self, data_dict: dict, is_training: bool = True) -> dict:
+        '''
+        if is_training:
+            data_dict['new_name'] = new_value
+            return data_dict
+        '''
+        return data_dict
+
     @abstractmethod
     def getLossDict(self, data_dict: dict, result_dict: dict) -> dict:
         '''
@@ -292,84 +300,6 @@ class BaseTrainer(ABC):
                 loss_item_dict[key] = item
 
         return loss_item_dict
-
-    @torch.no_grad()
-    def evalStep(
-        self,
-        data_dict: dict,
-    ) -> dict:
-        self.model.eval()
-
-        data_dict = moveTo(data_dict, self.device)
-
-        result_dict = self.model.module(data_dict)
-
-        loss_dict = self.getLossDict(data_dict, result_dict)
-
-        ema_result_dict = self.ema_model(data_dict)
-
-        ema_loss_dict = self.getLossDict(data_dict, ema_result_dict)
-
-        loss_item_dict = {}
-
-        for key, item in loss_dict.items():
-            if isinstance(item, torch.Tensor):
-                loss_item_dict[key] = item.clone().detach().cpu().numpy()
-            elif not isinstance(item, str):
-                loss_item_dict[key] = item
-
-        for key, item in ema_loss_dict.items():
-            if isinstance(item, torch.Tensor):
-                loss_item_dict['EMA_' + key] = item.clone().detach().cpu().numpy()
-            elif not isinstance(item, str):
-                loss_item_dict['EMA_' + key] = item
-
-        return loss_item_dict
-
-    @torch.no_grad()
-    def sampleModelStep(self, model: nn.Module, model_name: str) -> bool:
-        '''
-        self.logger.addScalar('Sample/' + model_name + '_name', value, self.step)
-        self.logger.addPointCloud(model_name + '/name', value, self.step)
-        return True
-        '''
-        return True
-
-    @torch.no_grad()
-    def sampleStep(self) -> bool:
-        if self.local_rank != 0:
-            return True
-
-        if self.sample_results_freq <= 0:
-            return True
-
-        if self.epoch % self.sample_results_freq != 0:
-            return True
-
-        self.sampleModelStep(self.model.module, 'Model')
-        return True
-
-    @torch.no_grad()
-    def sampleEMAStep(self) -> bool:
-        if self.local_rank != 0:
-            return True
-
-        if self.sample_results_freq <= 0:
-            return True
-
-        if self.epoch % self.sample_results_freq != 0:
-            return True
-
-        self.sampleModelStep(self.ema_model, 'EMA')
-        return True
-
-    def preProcessData(self, data_dict: dict, is_training: bool = True) -> dict:
-        '''
-        if is_training:
-            data_dict['new_name'] = new_value
-            return data_dict
-        '''
-        return data_dict
 
     def trainEpoch(self, data_name: str) -> bool:
         if data_name not in self.dataloader_dict.keys():
@@ -436,6 +366,39 @@ class BaseTrainer(ABC):
         return True
 
     @torch.no_grad()
+    def evalStep(
+        self,
+        data_dict: dict,
+    ) -> dict:
+        self.model.eval()
+
+        data_dict = moveTo(data_dict, self.device)
+
+        result_dict = self.model.module(data_dict)
+
+        loss_dict = self.getLossDict(data_dict, result_dict)
+
+        ema_result_dict = self.ema_model(data_dict)
+
+        ema_loss_dict = self.getLossDict(data_dict, ema_result_dict)
+
+        loss_item_dict = {}
+
+        for key, item in loss_dict.items():
+            if isinstance(item, torch.Tensor):
+                loss_item_dict[key] = item.clone().detach().cpu().numpy()
+            elif not isinstance(item, str):
+                loss_item_dict[key] = item
+
+        for key, item in ema_loss_dict.items():
+            if isinstance(item, torch.Tensor):
+                loss_item_dict['EMA_' + key] = item.clone().detach().cpu().numpy()
+            elif not isinstance(item, str):
+                loss_item_dict['EMA_' + key] = item
+
+        return loss_item_dict
+
+    @torch.no_grad()
     def evalEpoch(self) -> bool:
         if self.local_rank != 0:
             return True
@@ -468,6 +431,43 @@ class BaseTrainer(ABC):
                 if key == self.best_model_metric_name:
                     self.autoSaveModel('best', avg_item, self.is_metric_lower_better)
 
+        return True
+
+    @torch.no_grad()
+    def sampleModelStep(self, model: nn.Module, model_name: str) -> bool:
+        '''
+        self.logger.addScalar('Sample/' + model_name + '_name', value, self.step)
+        self.logger.addPointCloud(model_name + '/name', value, self.step)
+        return True
+        '''
+        return True
+
+    @torch.no_grad()
+    def sampleStep(self) -> bool:
+        if self.local_rank != 0:
+            return True
+
+        if self.sample_results_freq <= 0:
+            return True
+
+        if self.epoch % self.sample_results_freq != 0:
+            return True
+
+        self.sampleModelStep(self.model.module, 'Model')
+        return True
+
+    @torch.no_grad()
+    def sampleEMAStep(self) -> bool:
+        if self.local_rank != 0:
+            return True
+
+        if self.sample_results_freq <= 0:
+            return True
+
+        if self.epoch % self.sample_results_freq != 0:
+            return True
+
+        self.sampleModelStep(self.ema_model, 'EMA')
         return True
 
     def train(self) -> bool:
