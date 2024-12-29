@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 import torch.distributed as dist
 from torch import nn
 from typing import Union
@@ -14,6 +15,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from base_trainer.Method.device import moveTo
 from base_trainer.Method.time import getCurrentTime
 from base_trainer.Method.path import createFileFolder, renameFile, removeFile
+from base_trainer.Module.dataloader_x import DataLoaderX
 from base_trainer.Module.logger import Logger
 
 
@@ -48,6 +50,10 @@ class BaseTrainer(ABC):
         ema_decay: float = 0.999,
         save_result_folder_path: Union[str, None] = None,
         save_log_folder_path: Union[str, None] = None,
+        best_model_metric_name: Union[str, None] = None,
+        is_metric_lower_better: bool = True,
+        sample_results_freq: int = -1,
+        use_dataloader_x: bool = False,
     ) -> None:
         self.backend = 'nccl' if device != 'cpu' else 'gloo'
         self.local_rank = setup_distributed(self.backend)
@@ -67,9 +73,16 @@ class BaseTrainer(ABC):
         self.save_result_folder_path = save_result_folder_path
         self.save_log_folder_path = save_log_folder_path
 
+        self.best_model_metric_name = best_model_metric_name
+        self.is_metric_lower_better = is_metric_lower_better
+        self.sample_results_freq = sample_results_freq
+        self.use_dataloader_x = use_dataloader_x
+
         self.step = 0
         self.epoch = 0
         self.loss_dict_list = []
+
+        self.loss_min = float("inf")
 
         self.logger = None
         if self.local_rank == 0:
@@ -80,10 +93,15 @@ class BaseTrainer(ABC):
             print('\t createDatasets failed!')
             exit()
 
+        if use_dataloader_x:
+            DATALOADER = DataLoaderX
+        else:
+            DATALOADER = DataLoader
+
         self.dataloader_dict: dict
         for key, item in self.dataloader_dict.items():
             if key == 'eval':
-                self.dataloader_dict[key]['dataloader'] = DataLoader(
+                self.dataloader_dict[key]['dataloader'] = DATALOADER(
                     item['dataset'],
                     batch_size=batch_size,
                     num_workers=num_workers,
@@ -91,7 +109,7 @@ class BaseTrainer(ABC):
                 continue
 
             self.dataloader_dict[key]['sampler'] = DistributedSampler(item['dataset'])
-            self.dataloader_dict[key]['dataloader'] = DataLoader(
+            self.dataloader_dict[key]['dataloader'] = DATALOADER(
                 item['dataset'],
                 sampler=self.dataloader_dict[key]['sampler'],
                 batch_size=batch_size,
@@ -167,6 +185,8 @@ class BaseTrainer(ABC):
                 self.ema_model.load_state_dict(model_state_dict["ema_model"])
             if 'ema_loss' in model_state_dict.keys():
                 self.ema_loss = model_state_dict['ema_loss']
+            if 'loss_min' in model_state_dict.keys():
+                self.loss_min = model_state_dict['loss_min']
 
         print('[INFO][BaseTrainer::loadModel]')
         print('\t model loaded from:', model_file_path)
@@ -239,12 +259,14 @@ class BaseTrainer(ABC):
 
         loss_dict = self.getLossDict(data_dict, result_dict)
 
-        if 'loss' not in loss_dict:
+        if 'Loss' in loss_dict.keys():
+            loss = loss_dict['Loss']
+        elif 'loss' in loss_dict.keys():
+            loss = loss_dict['loss']
+        else:
             print('[ERROR][BaseTrainer::trainStep]')
             print('\t loss not found!')
             exit()
-
-        loss = loss_dict['loss']
 
         accum_loss = loss / self.accum_iter
 
@@ -320,6 +342,12 @@ class BaseTrainer(ABC):
         if self.local_rank != 0:
             return True
 
+        if self.sample_results_freq <= 0:
+            return True
+
+        if self.epoch % self.sample_results_freq != 0:
+            return True
+
         self.sampleModelStep(self.model.module, 'Model')
         return True
 
@@ -328,19 +356,26 @@ class BaseTrainer(ABC):
         if self.local_rank != 0:
             return True
 
+        if self.sample_results_freq <= 0:
+            return True
+
+        if self.epoch % self.sample_results_freq != 0:
+            return True
+
         self.sampleModelStep(self.ema_model, 'EMA')
         return True
 
-    def preProcessData(self, data_dict: dict) -> dict:
+    def preProcessData(self, data_dict: dict, is_training: bool = True) -> dict:
         '''
-        data_dict['new_name'] = new_value
-        return data_dict
+        if is_training:
+            data_dict['new_name'] = new_value
+            return data_dict
         '''
         return data_dict
 
     def trainEpoch(self, data_name: str) -> bool:
         if data_name not in self.dataloader_dict.keys():
-            print('[ERROR][Trainer::trainEpoch]')
+            print('[ERROR][BaseTrainer::trainEpoch]')
             print('\t data not exist!')
             print('\t data_name:', data_name)
             return False
@@ -353,7 +388,7 @@ class BaseTrainer(ABC):
         if self.local_rank == 0:
             pbar = tqdm(total=len(dataloader))
         for data_dict in dataloader:
-            data_dict = self.preProcessData(data_dict)
+            data_dict = self.preProcessData(data_dict, True)
 
             train_loss_dict = self.trainStep(data_dict)
 
@@ -410,20 +445,34 @@ class BaseTrainer(ABC):
         if 'eval' not in self.dataloader_dict.keys():
             return True
 
-        print('[INFO][Trainer::evalEpoch]')
-        print('\t start evaluating ...')
-
         dataloader = self.dataloader_dict['eval']['dataloader']
 
+        avg_loss_dict = {}
+
+        print('[INFO][BaseTrainer::evalEpoch]')
+        print('\t start evaluating ...')
         for data_dict in dataloader:
-            data_dict = self.preProcessData(data_dict)
+            data_dict = self.preProcessData(data_dict, False)
 
             eval_loss_dict = self.evalStep(data_dict)
 
             for key, item in eval_loss_dict.items():
-                self.logger.addScalar("Eval/" + key, item, self.step)
+                if key not in avg_loss_dict.keys():
+                    avg_loss_dict[key] = [item]
+                else:
+                    avg_loss_dict[key].append(item)
 
-            break
+        for key, item in avg_loss_dict.items():
+            avg_item = np.mean(item)
+            self.logger.addScalar("Eval/" + key, avg_item, self.step)
+
+        if self.best_model_metric_name is not None:
+            if self.best_model_metric_name in avg_loss_dict.keys():
+                self.autoSaveModel(
+                    'best',
+                    avg_loss_dict[self.best_model_metric_name],
+                    self.is_metric_lower_better,
+                )
 
         return True
 
@@ -431,7 +480,7 @@ class BaseTrainer(ABC):
         final_step = self.step + self.finetune_step_num
 
         if self.local_rank == 0:
-            print("[INFO][Trainer::train]")
+            print("[INFO][BaseTrainer::train]")
             print("\t start training ...")
 
         while self.step < final_step or self.finetune_step_num < 0:
@@ -444,24 +493,30 @@ class BaseTrainer(ABC):
 
                 for i in range(repeat_num):
                     if self.local_rank == 0:
-                        print('[INFO][Trainer::train]')
+                        print('[INFO][BaseTrainer::train]')
                         print('\t start training on dataset [', data_name, '] ,', i + 1, '/', repeat_num, '...')
 
                     if not self.trainEpoch(data_name):
-                        print('[ERROR][Trainer::train]')
+                        print('[ERROR][BaseTrainer::train]')
                         print('\t trainEpoch failed!')
                         return False
 
-                    self.autoSaveModel("total")
+                    self.autoSaveModel("last")
 
                     if not self.evalEpoch():
-                        print('[ERROR][Trainer::train]')
+                        print('[ERROR][BaseTrainer::train]')
                         print('\t evalEpoch failed!')
                         return False
 
-                    if self.epoch % 1 == 0:
-                        self.sampleStep()
-                        self.sampleEMAStep()
+                    if not self.sampleStep():
+                        print('[ERROR][BaseTrainer::train]')
+                        print('\t sampleStep failed!')
+                        return False
+
+                    if not self.sampleEMAStep():
+                        print('[ERROR][BaseTrainer::train]')
+                        print('\t sampleEMAStep failed!')
+                        return False
 
         return True
 
@@ -473,26 +528,40 @@ class BaseTrainer(ABC):
             "ema_model": self.ema_model.state_dict(),
             "ema_loss": self.ema_loss,
             "step": self.step,
+            "loss_min": self.loss_min,
         }
 
         torch.save(model_state_dict, save_model_file_path)
 
         return True
 
-    def autoSaveModel(self, name: str) -> bool:
+    def autoSaveModel(self, name: str, value: Union[float, None] = None, check_lower: bool = True) -> bool:
         if self.local_rank != 0:
             return True
 
         if self.save_result_folder_path is None:
             return False
 
-        save_last_model_file_path = self.save_result_folder_path + name + "_model_last.pth"
+        if value is not None:
+            if self.loss_min == float("inf"):
+                if not check_lower:
+                    self.loss_min = -float("inf")
 
-        tmp_save_last_model_file_path = save_last_model_file_path[:-4] + "_tmp.pth"
+            if check_lower:
+                if value > self.loss_min:
+                    return False
+            elif value < self.loss_min:
+                return False
 
-        self.saveModel(tmp_save_last_model_file_path)
+            self.loss_min = value
 
-        removeFile(save_last_model_file_path)
-        renameFile(tmp_save_last_model_file_path, save_last_model_file_path)
+        save_model_file_path = self.save_result_folder_path + "model_" + name + ".pth"
+
+        tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
+
+        self.saveModel(tmp_save_model_file_path)
+
+        removeFile(save_model_file_path)
+        renameFile(tmp_save_model_file_path, save_model_file_path)
 
         return True
