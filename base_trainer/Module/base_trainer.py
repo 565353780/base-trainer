@@ -326,7 +326,6 @@ class BaseTrainer(ABC):
 
         return loss_item_dict
 
-    @abstractmethod
     @torch.no_grad()
     def sampleModelStep(self, model: nn.Module, model_name: str) -> bool:
         '''
@@ -334,7 +333,7 @@ class BaseTrainer(ABC):
         self.logger.addPointCloud(model_name + '/name', value, self.step)
         return True
         '''
-        pass
+        return True
 
     @torch.no_grad()
     def sampleStep(self) -> bool:
