@@ -1,7 +1,7 @@
 import torch
 
 
-class DataPrefetcher:
+class DataPrefetcher(object):
     def __init__(self, loader, device: str = "cpu"):
         self.loader = iter(loader)
         self.device = device

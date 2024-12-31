@@ -25,7 +25,6 @@ class Trainer(BaseTrainer):
         best_model_metric_name: Union[str, None] = None,
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
-        use_dataloader_x: bool = False,
         use_amp: bool = False,
     ) -> None:
         # super params definition here
@@ -50,7 +49,6 @@ class Trainer(BaseTrainer):
             best_model_metric_name,
             is_metric_lower_better,
             sample_results_freq,
-            use_dataloader_x,
             use_amp,
         )
         return
@@ -131,7 +129,6 @@ def demo():
     best_model_metric_name = None
     is_metric_lower_better = True
     sample_results_freq = 1
-    use_dataloader_x = False
     use_amp = False
 
     trainer = Trainer(
@@ -152,7 +149,6 @@ def demo():
         best_model_metric_name,
         is_metric_lower_better,
         sample_results_freq,
-        use_dataloader_x,
         use_amp,
     )
 

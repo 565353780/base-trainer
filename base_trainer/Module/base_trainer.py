@@ -16,7 +16,8 @@ from torch.utils.data import DataLoader, DistributedSampler
 from base_trainer.Method.device import moveTo
 from base_trainer.Method.time import getCurrentTime
 from base_trainer.Method.path import createFileFolder, renameFile, removeFile
-from base_trainer.Module.dataloader_x import DataLoaderX
+from base_trainer.Module.data_prefetcher import DataPrefetcher
+# from base_trainer.Module.dataloader_x import DataLoaderX
 from base_trainer.Module.logger import Logger
 
 
@@ -37,8 +38,8 @@ def check_and_replace_nan_in_grad(model):
 class BaseTrainer(ABC):
     def __init__(
         self,
-        batch_size: int = 5,
-        accum_iter: int = 10,
+        batch_size: int = 32,
+        accum_iter: int = 1,
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
         device: str = "auto",
@@ -54,7 +55,6 @@ class BaseTrainer(ABC):
         best_model_metric_name: Union[str, None] = None,
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
-        use_dataloader_x: bool = False,
         use_amp: bool = False,
     ) -> None:
         self.backend = 'nccl' if device != 'cpu' else 'gloo'
@@ -78,7 +78,6 @@ class BaseTrainer(ABC):
         self.best_model_metric_name = best_model_metric_name
         self.is_metric_lower_better = is_metric_lower_better
         self.sample_results_freq = sample_results_freq
-        self.use_dataloader_x = use_dataloader_x
         self.use_amp = use_amp
 
         self.scaler = None
@@ -101,22 +100,18 @@ class BaseTrainer(ABC):
             print('\t createDatasets failed!')
             exit()
 
-        if use_dataloader_x:
-            DATALOADER = DataLoaderX
-        else:
-            DATALOADER = DataLoader
         for key, item in self.dataloader_dict.items():
             if key == 'eval':
-                self.dataloader_dict[key]['dataloader'] = DATALOADER(
-                    item['dataset'],
+                self.dataloader_dict[key]['dataloader'] = DataLoader(
+                    dataset=item['dataset'],
                     batch_size=batch_size,
                     num_workers=num_workers,
                 )
                 continue
 
             self.dataloader_dict[key]['sampler'] = DistributedSampler(item['dataset'])
-            self.dataloader_dict[key]['dataloader'] = DATALOADER(
-                item['dataset'],
+            self.dataloader_dict[key]['dataloader'] = DataLoader(
+                dataset=item['dataset'],
                 sampler=self.dataloader_dict[key]['sampler'],
                 batch_size=batch_size,
                 num_workers=num_workers,
@@ -335,10 +330,13 @@ class BaseTrainer(ABC):
         dataloader_dict['sampler'].set_epoch(self.epoch)
 
         dataloader = dataloader_dict['dataloader']
+        data_prefetcher = DataPrefetcher(dataloader, self.local_rank)
+
+        data_dict = data_prefetcher.next()
 
         if self.local_rank == 0:
             pbar = tqdm(total=len(dataloader))
-        for data_dict in dataloader:
+        while data_dict is not None:
             data_dict = self.preProcessData(data_dict, True)
 
             train_loss_dict = self.trainStep(data_dict)
@@ -380,6 +378,8 @@ class BaseTrainer(ABC):
 
             if self.local_rank == 0:
                 pbar.update(1)
+
+            data_dict = data_prefetcher.next()
 
         if self.local_rank == 0:
             pbar.close()
