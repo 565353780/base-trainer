@@ -17,7 +17,6 @@ from base_trainer.Method.device import moveTo
 from base_trainer.Method.time import getCurrentTime
 from base_trainer.Method.path import createFileFolder, renameFile, removeFile
 from base_trainer.Module.data_prefetcher import DataPrefetcher
-# from base_trainer.Module.dataloader_x import DataLoaderX
 from base_trainer.Module.logger import Logger
 
 
@@ -142,8 +141,6 @@ class BaseTrainer(ABC):
         self.sched = LambdaLR(self.optim, lr_lambda=self.warmup_lr)
 
         self.initRecords()
-
-        self.gt_sample_added_to_logger = False
         return
 
     @abstractmethod
