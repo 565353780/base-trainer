@@ -26,6 +26,7 @@ class Trainer(BaseTrainer):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         use_amp: bool = False,
+        quick_test: bool = False,
     ) -> None:
         # super params definition here
         # self.name = value
@@ -50,6 +51,7 @@ class Trainer(BaseTrainer):
             is_metric_lower_better,
             sample_results_freq,
             use_amp,
+            quick_test,
         )
         return
 
@@ -130,6 +132,7 @@ def demo():
     is_metric_lower_better = True
     sample_results_freq = 1
     use_amp = False
+    quick_test = False
 
     trainer = Trainer(
         batch_size,
@@ -150,6 +153,7 @@ def demo():
         is_metric_lower_better,
         sample_results_freq,
         use_amp,
+        quick_test,
     )
 
     trainer.train()

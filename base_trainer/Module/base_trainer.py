@@ -55,6 +55,7 @@ class BaseTrainer(ABC):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         use_amp: bool = False,
+        quick_test: bool = False,
     ) -> None:
         self.backend = 'nccl' if device != 'cpu' else 'gloo'
         self.local_rank = setup_distributed(self.backend)
@@ -78,6 +79,7 @@ class BaseTrainer(ABC):
         self.is_metric_lower_better = is_metric_lower_better
         self.sample_results_freq = sample_results_freq
         self.use_amp = use_amp
+        self.quick_test = quick_test
 
         self.scaler = None
         if self.use_amp:
@@ -376,6 +378,9 @@ class BaseTrainer(ABC):
             if self.local_rank == 0:
                 pbar.update(1)
 
+            if self.quick_test:
+                break
+
             data_dict = data_prefetcher.next()
 
         if self.local_rank == 0:
@@ -457,6 +462,9 @@ class BaseTrainer(ABC):
 
             pbar.update(1)
 
+            if self.quick_test:
+                break
+
         pbar.close()
 
         for key, item in avg_loss_dict.items():
@@ -483,6 +491,10 @@ class BaseTrainer(ABC):
         if self.local_rank != 0:
             return True
 
+        if self.quick_test:
+            self.sampleModelStep(self.model.module, 'Model')
+            return True
+
         if self.sample_results_freq <= 0:
             return True
 
@@ -495,6 +507,10 @@ class BaseTrainer(ABC):
     @torch.no_grad()
     def sampleEMAStep(self) -> bool:
         if self.local_rank != 0:
+            return True
+
+        if self.quick_test:
+            self.sampleModelStep(self.model.module, 'EMA')
             return True
 
         if self.sample_results_freq <= 0:
