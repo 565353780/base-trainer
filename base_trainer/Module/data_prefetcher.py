@@ -17,7 +17,8 @@ class DataPrefetcher(object):
             return
         with torch.cuda.stream(self.stream):
             for k in self.batch:
-                self.batch[k] = self.batch[k].to(device=self.device, non_blocking=True)
+                if isinstance(self.batch[k], torch.Tensor):
+                    self.batch[k] = self.batch[k].to(device=self.device, non_blocking=True)
         return
 
     def next(self):

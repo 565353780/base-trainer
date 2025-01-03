@@ -6,6 +6,7 @@ from torch import nn
 from tqdm import tqdm
 from typing import Union
 from copy import deepcopy
+from functools import partial
 from abc import ABC, abstractmethod
 from torch.optim.adamw import AdamW
 from torch.amp import GradScaler, autocast
@@ -17,6 +18,7 @@ from base_trainer.Method.device import moveTo
 from base_trainer.Method.time import getCurrentTime
 from base_trainer.Method.path import createFileFolder, renameFile, removeFile
 from base_trainer.Module.data_prefetcher import DataPrefetcher
+from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 
 
@@ -60,7 +62,9 @@ class BaseTrainer(ABC):
         self.backend = 'nccl' if device != 'cpu' else 'gloo'
         self.local_rank = setup_distributed(self.backend)
 
+        self.batch_size = batch_size
         self.accum_iter = accum_iter
+        self.num_workers = num_workers
         if device == 'auto':
             self.device = torch.device('cuda:' + str(self.local_rank))
         else:
@@ -329,14 +333,17 @@ class BaseTrainer(ABC):
         dataloader_dict['sampler'].set_epoch(self.epoch)
 
         dataloader = dataloader_dict['dataloader']
-        data_prefetcher = DataPrefetcher(dataloader, self.local_rank)
+
+        async_dataloader = AsyncDataLoader(dataloader, partial(self.preProcessData, is_training=True), self.num_workers)
+
+        data_prefetcher = DataPrefetcher(async_dataloader, self.local_rank)
 
         data_dict = data_prefetcher.next()
 
         if self.local_rank == 0:
             pbar = tqdm(total=len(dataloader))
         while data_dict is not None:
-            data_dict = self.preProcessData(data_dict, True)
+            # data_dict = self.preProcessData(data_dict, True)
 
             train_loss_dict = self.trainStep(data_dict)
 
@@ -435,13 +442,15 @@ class BaseTrainer(ABC):
 
         dataloader = self.dataloader_dict['eval']['dataloader']
 
+        async_dataloader = AsyncDataLoader(dataloader, partial(self.preProcessData, is_training=False), self.num_workers)
+
         avg_loss_dict = {}
 
         print('[INFO][BaseTrainer::evalEpoch]')
         print('\t start evaluating ...')
         pbar = tqdm(total=len(dataloader))
-        for data_dict in dataloader:
-            data_dict = self.preProcessData(data_dict, False)
+        for data_dict in async_dataloader:
+            # data_dict = self.preProcessData(data_dict, False)
 
             eval_loss_dict = self.evalStep(data_dict)
 
