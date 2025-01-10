@@ -44,6 +44,7 @@ class BaseTrainer(ABC):
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
         device: str = "auto",
+        dtype = torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
         lr: float = 2e-4,
@@ -69,6 +70,13 @@ class BaseTrainer(ABC):
             self.device = torch.device('cuda:' + str(self.local_rank))
         else:
             self.device = device
+        if dtype == 'auto':
+            if torch.cuda.is_bf16_supported():
+                self.dtype = torch.bfloat16
+            else:
+                self.dtype = torch.float16
+        else:
+            self.dtype = dtype
         self.warm_step_num = warm_step_num / accum_iter
         self.finetune_step_num = finetune_step_num
         self.lr = lr * batch_size / lr_batch_size * self.accum_iter * dist.get_world_size()
@@ -87,6 +95,10 @@ class BaseTrainer(ABC):
 
         self.scaler = None
         if self.use_amp:
+            if torch.cuda.is_bf16_supported():
+                self.amp_dtype = torch.bfloat16
+            else:
+                self.amp_dtype = torch.float16
             self.scaler = GradScaler()
 
         self.step = 0
@@ -120,6 +132,7 @@ class BaseTrainer(ABC):
                 sampler=self.dataloader_dict[key]['sampler'],
                 batch_size=batch_size,
                 num_workers=num_workers,
+                pin_memory=True
             )
 
         self.model: nn.Module
@@ -272,7 +285,7 @@ class BaseTrainer(ABC):
         result_dict = self.postProcessData(data_dict, result_dict, True)
 
         if self.use_amp:
-            with autocast('cuda'):
+            with autocast('cuda', dtype=self.amp_dtype):
                 loss_dict = self.getLossDict(data_dict, result_dict)
         else:
             loss_dict = self.getLossDict(data_dict, result_dict)

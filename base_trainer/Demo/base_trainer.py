@@ -13,6 +13,7 @@ class Trainer(BaseTrainer):
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
         device: str = "cuda:0",
+        dtype = torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
         lr: float = 2e-4,
@@ -38,6 +39,7 @@ class Trainer(BaseTrainer):
             num_workers,
             model_file_path,
             device,
+            dtype,
             warm_step_num,
             finetune_step_num,
             lr,
@@ -57,12 +59,12 @@ class Trainer(BaseTrainer):
 
     def createDatasets(self) -> bool:
         self.dataloader_dict['name'] =  {
-            'dataset': Dataset(),
+            'dataset': Dataset(self.dtype),
             'repeat_num': 1,
         }
 
         self.dataloader_dict['eval'] =  {
-            'dataset': Dataset(),
+            'dataset': Dataset(self.dtype),
         }
 
         # crop data num for faster evaluation
@@ -70,7 +72,7 @@ class Trainer(BaseTrainer):
         return True
 
     def createModel(self) -> bool:
-        self.model = nn.Module().to(self.device)
+        self.model = nn.Module().to(self.device, dtype=self.dtype)
         return True
 
     def preProcessData(self, data_dict: dict, is_training: bool = False) -> dict:
@@ -119,6 +121,7 @@ def demo():
     model_file_path = None
     model_file_path = "../../output/20241225_15:14:36/model_last.pth".replace('../../', './')
     device = "auto"
+    dtype = torch.float32
     warm_step_num = 2000
     finetune_step_num = -1
     lr = 2e-4
@@ -140,6 +143,7 @@ def demo():
         num_workers,
         model_file_path,
         device,
+        dtype,
         warm_step_num,
         finetune_step_num,
         lr,
