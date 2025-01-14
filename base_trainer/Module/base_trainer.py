@@ -515,6 +515,7 @@ class BaseTrainer(ABC):
 
         if self.quick_test:
             self.sampleModelStep(self.model.module, 'Model')
+            torch.cuda.empty_cache()
             return True
 
         if self.sample_results_freq <= 0:
@@ -524,6 +525,7 @@ class BaseTrainer(ABC):
             return True
 
         self.sampleModelStep(self.model.module, 'Model')
+        torch.cuda.empty_cache()
         return True
 
     @torch.no_grad()
@@ -533,6 +535,7 @@ class BaseTrainer(ABC):
 
         if self.quick_test:
             self.sampleModelStep(self.model.module, 'EMA')
+            torch.cuda.empty_cache()
             return True
 
         if self.sample_results_freq <= 0:
@@ -542,6 +545,7 @@ class BaseTrainer(ABC):
             return True
 
         self.sampleModelStep(self.ema_model, 'EMA')
+        torch.cuda.empty_cache()
         return True
 
     def postProcessData(self, data_dict: dict, result_dict: dict, is_training: bool = True) -> dict:
