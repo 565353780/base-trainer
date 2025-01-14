@@ -1,5 +1,6 @@
 import os
 import torch
+import trimesh
 import numpy as np
 import open3d as o3d
 from typing import Union
@@ -83,6 +84,10 @@ class Logger(object):
             vertices = torch.tensor(pcd).reshape(1, -1, 3)
         elif isinstance(pcd, torch.Tensor):
             vertices = pcd.reshape(1, -1, 3)
+        else:
+            print('[ERROR][Logger::addPointCloud]')
+            print('\t pcd type not valid!')
+            return False
 
         if step is not None:
             self.setStep(name, step)
@@ -90,6 +95,35 @@ class Logger(object):
         name_step = self.getNameStep(name)
 
         self.summary_writer.add_mesh(name, vertices, global_step=name_step)
+        return True
+
+    def addMesh(self, name: str, mesh: Union[o3d.geometry.TriangleMesh, trimesh.Trimesh], step: Union[int, None]=None) -> bool:
+        if not self.isValid():
+            if self.is_mute or self.error_outputed:
+                return False
+
+            print("[ERROR][Logger::addMesh]")
+            print("\t isValid failed!")
+            self.error_outputed = True
+            return False
+
+        if isinstance(mesh, o3d.geometry.TriangleMesh):
+            vertices = torch.tensor(np.asarray(mesh.vertices), dtype=torch.float32).unsqueeze(0)
+            faces = torch.tensor(np.asarray(mesh.triangles), dtype=torch.int32).unsqueeze(0)
+        elif isinstance(mesh, trimesh.Trimesh):
+            vertices = torch.tensor(mesh.vertices, dtype=torch.float32).unsqueeze(0)
+            faces = torch.tensor(mesh.faces, dtype=torch.int32).unsqueeze(0)
+        else:
+            print('[ERROR][Logger::addMesh]')
+            print('\t mesh type not valid!')
+            return False
+
+        if step is not None:
+            self.setStep(name, step)
+
+        name_step = self.getNameStep(name)
+
+        self.summary_writer.add_mesh(name, vertices, faces=faces, global_step=name_step)
         return True
 
     def addPointCloudFile(self, name: str, pcd_file_path: str, step: Union[int, None]=None) -> bool:
@@ -107,6 +141,39 @@ class Logger(object):
         if not self.addPointCloud(name, pcd, step):
             print("[ERROR][Logger::addPointCloudFile]")
             print("\t addPointCloud failed!")
+            return False
+
+        return True
+
+    def addMeshFile(self,
+                    name: str,
+                    mesh_file_path: str,
+                    step: Union[int, None]=None,
+                    backend: str = 'open3d',
+                    ) -> bool:
+        if not os.path.exists(mesh_file_path):
+            if self.is_mute:
+                return False
+
+            print("[ERROR][Logger::addMeshFile]")
+            print("\t mesh file not exist!")
+            print('\t mesh_file_path:', mesh_file_path)
+            return False
+
+        if backend == 'open3d':
+            mesh = o3d.io.read_triangle_mesh(mesh_file_path)
+        elif backend == 'trimesh':
+            mesh = trimesh.load(mesh_file_path)
+        else:
+            print('[ERROR][Logger::addMeshFile]')
+            print('\t backend not valid!')
+            print('\t backend:', backend)
+            print('\t valid backends: open3d trimesh')
+            return False
+
+        if not self.addMesh(name, mesh, step):
+            print("[ERROR][Logger::addMeshFile]")
+            print("\t addMesh failed!")
             return False
 
         return True
