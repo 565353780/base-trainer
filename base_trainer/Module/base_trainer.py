@@ -199,6 +199,8 @@ class BaseTrainer(ABC):
         if not weights_only:
             if 'step' in model_state_dict.keys():
                 self.step = model_state_dict['step']
+            if 'epoch' in model_state_dict.keys():
+                self.epoch = model_state_dict['epoch']
 
         if self.local_rank == 0:
             if 'ema_model' in model_state_dict.keys():
@@ -413,6 +415,9 @@ class BaseTrainer(ABC):
 
         self.epoch += 1
 
+        if self.local_rank == 0:
+            self.logger.addScalar("Train/Epoch", self.epoch, self.step)
+
         return True
 
     @torch.no_grad()
@@ -613,6 +618,7 @@ class BaseTrainer(ABC):
             "ema_model": self.ema_model.state_dict(),
             "ema_loss": self.ema_loss,
             "step": self.step,
+            "epoch": self.epoch,
             "loss_min": self.loss_min,
         }
 
