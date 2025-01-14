@@ -12,6 +12,7 @@ class Trainer(BaseTrainer):
         accum_iter: int = 10,
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
+        weights_only: bool = False,
         device: str = "cuda:0",
         dtype = torch.float32,
         warm_step_num: int = 2000,
@@ -38,6 +39,7 @@ class Trainer(BaseTrainer):
             accum_iter,
             num_workers,
             model_file_path,
+            weights_only,
             device,
             dtype,
             warm_step_num,
@@ -108,9 +110,11 @@ class Trainer(BaseTrainer):
         data = dataset.__getitem__(0)
 
         # process data here
-        pcd = data
+        pcd = data['pcd']
+        mesh = data['mesh']
 
         self.logger.addPointCloud(model_name + '/pcd_0', pcd, self.step)
+        self.logger.addMesh(model_name + '/mesh_0', mesh, self.step)
 
         return True
 
@@ -120,6 +124,7 @@ def demo():
     num_workers = 16
     model_file_path = None
     model_file_path = "../../output/20241225_15:14:36/model_last.pth".replace('../../', './')
+    weights_only = False
     device = "auto"
     dtype = torch.float32
     warm_step_num = 2000
@@ -142,6 +147,7 @@ def demo():
         accum_iter,
         num_workers,
         model_file_path,
+        weights_only,
         device,
         dtype,
         warm_step_num,

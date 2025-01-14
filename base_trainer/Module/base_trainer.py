@@ -43,6 +43,7 @@ class BaseTrainer(ABC):
         accum_iter: int = 1,
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
+        weights_only: bool = False,
         device: str = "auto",
         dtype = torch.float32,
         warm_step_num: int = 2000,
@@ -151,7 +152,7 @@ class BaseTrainer(ABC):
             self.model = DDP(self.model)
 
         if model_file_path is not None:
-            if not self.loadModel(model_file_path):
+            if not self.loadModel(model_file_path, weights_only):
                 print('[ERROR][BaseTrainer::__init__]')
                 print('\t loadModel failed!')
                 exit()
@@ -184,7 +185,7 @@ class BaseTrainer(ABC):
         '''
         pass
 
-    def loadModel(self, model_file_path: str) -> bool:
+    def loadModel(self, model_file_path: str, weights_only: bool = False) -> bool:
         if not os.path.exists(model_file_path):
             print("[ERROR][BaseTrainer::loadModel]")
             print("\t model file not exist!")
@@ -194,16 +195,20 @@ class BaseTrainer(ABC):
         model_state_dict = torch.load(model_file_path, map_location='cpu')
         if 'model' in model_state_dict.keys():
             self.model.module.load_state_dict(model_state_dict["model"])
-        if 'step' in model_state_dict.keys():
-            self.step = model_state_dict['step']
+
+        if not weights_only:
+            if 'step' in model_state_dict.keys():
+                self.step = model_state_dict['step']
 
         if self.local_rank == 0:
             if 'ema_model' in model_state_dict.keys():
                 self.ema_model.load_state_dict(model_state_dict["ema_model"])
-            if 'ema_loss' in model_state_dict.keys():
-                self.ema_loss = model_state_dict['ema_loss']
-            if 'loss_min' in model_state_dict.keys():
-                self.loss_min = model_state_dict['loss_min']
+
+            if not weights_only:
+                if 'ema_loss' in model_state_dict.keys():
+                    self.ema_loss = model_state_dict['ema_loss']
+                if 'loss_min' in model_state_dict.keys():
+                    self.loss_min = model_state_dict['loss_min']
 
         print('[INFO][BaseTrainer::loadModel]')
         print('\t model loaded from:', model_file_path)
@@ -581,22 +586,22 @@ class BaseTrainer(ABC):
                         print('\t trainEpoch failed!')
                         return False
 
-                    self.autoSaveModel("last")
+                self.autoSaveModel("last")
 
-                    if not self.evalEpoch():
-                        print('[ERROR][BaseTrainer::train]')
-                        print('\t evalEpoch failed!')
-                        return False
+                if not self.evalEpoch():
+                    print('[ERROR][BaseTrainer::train]')
+                    print('\t evalEpoch failed!')
+                    return False
 
-                    if not self.sampleStep():
-                        print('[ERROR][BaseTrainer::train]')
-                        print('\t sampleStep failed!')
-                        return False
+                if not self.sampleStep():
+                    print('[ERROR][BaseTrainer::train]')
+                    print('\t sampleStep failed!')
+                    return False
 
-                    if not self.sampleEMAStep():
-                        print('[ERROR][BaseTrainer::train]')
-                        print('\t sampleEMAStep failed!')
-                        return False
+                if not self.sampleEMAStep():
+                    print('[ERROR][BaseTrainer::train]')
+                    print('\t sampleEMAStep failed!')
+                    return False
 
         return True
 
