@@ -416,6 +416,8 @@ class BaseTrainer(ABC):
             try:
                 data_dict = data_prefetcher.next()
             except:
+                print('[WARN][BaseTrainer::train]')
+                print('\t call next for DataPrefetcher failed! will early stop this training epoch!')
                 break
 
         if self.local_rank == 0:
