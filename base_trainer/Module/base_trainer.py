@@ -358,7 +358,12 @@ class BaseTrainer(ABC):
 
         data_prefetcher = DataPrefetcher(async_dataloader, self.local_rank)
 
-        data_dict = data_prefetcher.next()
+        try:
+            data_dict = data_prefetcher.next()
+        except:
+            print('[WARN][BaseTrainer::trainEpoch]')
+            print('\t call next for DataPrefetcher failed! will skip this training epoch!')
+            return True
 
         if self.local_rank == 0:
             pbar = tqdm(total=len(dataloader))
@@ -408,7 +413,10 @@ class BaseTrainer(ABC):
             if self.quick_test:
                 break
 
-            data_dict = data_prefetcher.next()
+            try:
+                data_dict = data_prefetcher.next()
+            except:
+                break
 
         if self.local_rank == 0:
             pbar.close()
