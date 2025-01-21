@@ -196,9 +196,11 @@ class BaseTrainer(ABC):
         if 'model' in model_state_dict.keys():
             try:
                 self.model.module.load_state_dict(model_state_dict["model"])
-            except:
+            except Exception as e:
                 print('[WARN][BaseTrainer::loadModel]')
                 print('\t model state dict not fully match current model! will load matched data only!')
+                print('\t  Exception:')
+                print('\t', e)
                 self.model.module.load_state_dict(model_state_dict["model"], strict=False)
 
         if not weights_only:
@@ -211,9 +213,11 @@ class BaseTrainer(ABC):
             if 'ema_model' in model_state_dict.keys():
                 try:
                     self.ema_model.load_state_dict(model_state_dict["ema_model"])
-                except:
+                except Exception as e:
                     print('[WARN][BaseTrainer::loadModel]')
                     print('\t ema model state dict not fully match current ema model! will load matched data only!')
+                    print('\t  Exception:')
+                    print('\t', e)
                     self.ema_model.load_state_dict(model_state_dict["ema_model"], strict=False)
 
             if not weights_only:
