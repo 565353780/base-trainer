@@ -194,7 +194,12 @@ class BaseTrainer(ABC):
 
         model_state_dict = torch.load(model_file_path, map_location='cpu')
         if 'model' in model_state_dict.keys():
-            self.model.module.load_state_dict(model_state_dict["model"])
+            try:
+                self.model.module.load_state_dict(model_state_dict["model"])
+            except:
+                print('[WARN][BaseTrainer::loadModel]')
+                print('\t model state dict not fully match current model! will load matched data only!')
+                self.model.module.load_state_dict(model_state_dict["model"], strict=False)
 
         if not weights_only:
             if 'step' in model_state_dict.keys():
@@ -204,7 +209,12 @@ class BaseTrainer(ABC):
 
         if self.local_rank == 0:
             if 'ema_model' in model_state_dict.keys():
-                self.ema_model.load_state_dict(model_state_dict["ema_model"])
+                try:
+                    self.ema_model.load_state_dict(model_state_dict["ema_model"])
+                except:
+                    print('[WARN][BaseTrainer::loadModel]')
+                    print('\t ema model state dict not fully match current ema model! will load matched data only!')
+                    self.ema_model.load_state_dict(model_state_dict["ema_model"], strict=False)
 
             if not weights_only:
                 if 'ema_loss' in model_state_dict.keys():
