@@ -26,8 +26,8 @@ def setup_distributed(backend: str = "nccl"):
     if "SLURM_NTASKS" in os.environ:
         dist.init_process_group(backend=backend)
 
-    if "SLURM_PROCID" in os.environ:
-        local_rank = int(os.environ["SLURM_PROCID"])
+    if "RANK" in os.environ:
+        local_rank = int(os.environ["RANK"])
     else:
         local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
