@@ -27,11 +27,11 @@ def setup_distributed(backend: str = "nccl"):
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
 
-    if "SLURM_PROCID" in os.environ:
-        rank = int(os.environ["SLURM_PROCID"])
+    if "SLURM_NODEID" in os.environ:
+        node_rank = int(os.environ["SLURM_NODEID"])
     else:
-        rank = local_rank
-    return rank, local_rank
+        node_rank = 0
+    return node_rank, local_rank
 
 
 def check_and_replace_nan_in_grad(model):
@@ -70,7 +70,8 @@ class BaseTrainer(ABC):
         quick_test: bool = False,
     ) -> None:
         self.backend = "nccl" if device != "cpu" else "gloo"
-        self.rank, self.local_rank = setup_distributed(self.backend)
+        self.node_rank, self.local_rank = setup_distributed(self.backend)
+        self.is_logger = (self.node_rank == 0) and (self.local_rank == 0)
 
         self.batch_size = batch_size
         self.accum_iter = accum_iter
@@ -122,7 +123,7 @@ class BaseTrainer(ABC):
         self.loss_min = float("inf")
 
         self.logger = None
-        if self.rank == 0:
+        if self.is_logger:
             self.logger = Logger()
 
         self.dataloader_dict = {}
@@ -155,7 +156,7 @@ class BaseTrainer(ABC):
             print("\t createModel failed!")
             exit()
 
-        if self.rank == 0:
+        if self.is_logger:
             self.ema_model = deepcopy(self.model)
             self.ema_loss = None
 
@@ -228,7 +229,7 @@ class BaseTrainer(ABC):
             if "epoch" in model_state_dict.keys():
                 self.epoch = model_state_dict["epoch"]
 
-        if self.rank == 0:
+        if self.is_logger:
             if "ema_model" in model_state_dict.keys():
                 try:
                     self.ema_model.load_state_dict(model_state_dict["ema_model"])
@@ -369,7 +370,7 @@ class BaseTrainer(ABC):
                 self.optim.step()
 
             self.sched.step()
-            if self.rank == 0:
+            if self.is_logger:
                 self.ema()
             self.optim.zero_grad()
 
@@ -398,7 +399,7 @@ class BaseTrainer(ABC):
             dataloader, partial(self.preProcessData, is_training=True), self.num_workers
         )
 
-        data_prefetcher = DataPrefetcher(async_dataloader, self.rank)
+        data_prefetcher = DataPrefetcher(async_dataloader, self.local_rank)
 
         try:
             data_dict = data_prefetcher.next()
@@ -409,7 +410,7 @@ class BaseTrainer(ABC):
             )
             return True
 
-        if self.rank == 0:
+        if self.is_logger:
             pbar = tqdm(total=len(dataloader))
         while data_dict is not None:
             # data_dict = self.preProcessData(data_dict, True)
@@ -420,7 +421,7 @@ class BaseTrainer(ABC):
 
             lr = self.getLr()
 
-            if (self.step + 1) % self.accum_iter == 0 and self.rank == 0:
+            if (self.step + 1) % self.accum_iter == 0 and self.is_logger:
                 for key in train_loss_dict.keys():
                     value = 0
                     for i in range(len(self.loss_dict_list)):
@@ -441,7 +442,7 @@ class BaseTrainer(ABC):
 
                 self.loss_dict_list = []
 
-            if self.rank == 0:
+            if self.is_logger:
                 pbar.set_description(
                     "EPOCH %d LOSS %.6f LR %.4f"
                     % (
@@ -453,7 +454,7 @@ class BaseTrainer(ABC):
 
             self.step += 1
 
-            if self.rank == 0:
+            if self.is_logger:
                 pbar.update(1)
 
             if self.quick_test:
@@ -468,12 +469,12 @@ class BaseTrainer(ABC):
                 )
                 break
 
-        if self.rank == 0:
+        if self.is_logger:
             pbar.close()
 
         self.epoch += 1
 
-        if self.rank == 0:
+        if self.is_logger:
             self.logger.addScalar("Train/Epoch", self.epoch, self.step)
 
         return True
@@ -515,7 +516,7 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def evalEpoch(self) -> bool:
-        if self.rank != 0:
+        if not self.is_logger:
             return True
 
         if "eval" not in self.dataloader_dict.keys():
@@ -582,7 +583,7 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def sampleStep(self) -> bool:
-        if self.rank != 0:
+        if not self.is_logger:
             return True
 
         if self.quick_test:
@@ -602,7 +603,7 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def sampleEMAStep(self) -> bool:
-        if self.rank != 0:
+        if not self.is_logger:
             return True
 
         if self.quick_test:
@@ -633,7 +634,7 @@ class BaseTrainer(ABC):
     def train(self) -> bool:
         final_step = self.step + self.finetune_step_num
 
-        if self.rank == 0:
+        if self.is_logger:
             print("[INFO][BaseTrainer::train]")
             print("\t start training ...")
 
@@ -645,7 +646,7 @@ class BaseTrainer(ABC):
                 repeat_num = self.dataloader_dict[data_name]["repeat_num"]
 
                 for i in range(repeat_num):
-                    if self.rank == 0:
+                    if self.is_logger:
                         print("[INFO][BaseTrainer::train]")
                         print(
                             "\t start training on dataset [",
@@ -700,7 +701,7 @@ class BaseTrainer(ABC):
     def autoSaveModel(
         self, name: str, value: Union[float, None] = None, check_lower: bool = True
     ) -> bool:
-        if self.rank != 0:
+        if not self.is_logger:
             return True
 
         if self.save_result_folder_path is None:
