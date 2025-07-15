@@ -22,17 +22,20 @@ from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 
 
-def setup_distributed(backend: str = 'nccl'):
+def setup_distributed(backend: str = "nccl"):
     dist.init_process_group(backend=backend)
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     return local_rank
 
+
 def check_and_replace_nan_in_grad(model):
     for name, param in model.named_parameters():
         if param.grad is not None and torch.isnan(param.grad).any():
             print(f"NaN detected in gradient: {name}")
-            param.grad = torch.where(torch.isnan(param.grad), torch.zeros_like(param.grad), param.grad)
+            param.grad = torch.where(
+                torch.isnan(param.grad), torch.zeros_like(param.grad), param.grad
+            )
     return True
 
 
@@ -45,7 +48,7 @@ class BaseTrainer(ABC):
         model_file_path: Union[str, None] = None,
         weights_only: bool = False,
         device: str = "auto",
-        dtype = torch.float32,
+        dtype=torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
         lr: float = 2e-4,
@@ -61,17 +64,17 @@ class BaseTrainer(ABC):
         use_amp: bool = False,
         quick_test: bool = False,
     ) -> None:
-        self.backend = 'nccl' if device != 'cpu' else 'gloo'
+        self.backend = "nccl" if device != "cpu" else "gloo"
         self.local_rank = setup_distributed(self.backend)
 
         self.batch_size = batch_size
         self.accum_iter = accum_iter
         self.num_workers = num_workers
-        if device == 'auto':
-            self.device = torch.device('cuda:' + str(self.local_rank))
+        if device == "auto":
+            self.device = torch.device("cuda:" + str(self.local_rank))
         else:
             self.device = device
-        if dtype == 'auto':
+        if dtype == "auto":
             if torch.cuda.is_bf16_supported():
                 self.dtype = torch.bfloat16
             else:
@@ -80,7 +83,9 @@ class BaseTrainer(ABC):
             self.dtype = dtype
         self.warm_step_num = warm_step_num / accum_iter
         self.finetune_step_num = finetune_step_num
-        self.lr = lr * batch_size / lr_batch_size * self.accum_iter * dist.get_world_size()
+        self.lr = (
+            lr * batch_size / lr_batch_size * self.accum_iter * dist.get_world_size()
+        )
         self.ema_start_step = ema_start_step
         self.ema_decay_init = ema_decay_init
         self.ema_decay = ema_decay
@@ -114,47 +119,49 @@ class BaseTrainer(ABC):
 
         self.dataloader_dict = {}
         if not self.createDatasets():
-            print('[ERROR][BaseTrainer::__init__]')
-            print('\t createDatasets failed!')
+            print("[ERROR][BaseTrainer::__init__]")
+            print("\t createDatasets failed!")
             exit()
 
         for key, item in self.dataloader_dict.items():
-            if key == 'eval':
-                self.dataloader_dict[key]['dataloader'] = DataLoader(
-                    dataset=item['dataset'],
+            if key == "eval":
+                self.dataloader_dict[key]["dataloader"] = DataLoader(
+                    dataset=item["dataset"],
                     batch_size=batch_size,
                     num_workers=num_workers,
                 )
                 continue
 
-            self.dataloader_dict[key]['sampler'] = DistributedSampler(item['dataset'])
-            self.dataloader_dict[key]['dataloader'] = DataLoader(
-                dataset=item['dataset'],
-                sampler=self.dataloader_dict[key]['sampler'],
+            self.dataloader_dict[key]["sampler"] = DistributedSampler(item["dataset"])
+            self.dataloader_dict[key]["dataloader"] = DataLoader(
+                dataset=item["dataset"],
+                sampler=self.dataloader_dict[key]["sampler"],
                 batch_size=batch_size,
                 num_workers=num_workers,
-                pin_memory=True
+                pin_memory=True,
             )
 
         self.model: nn.Module
         if not self.createModel():
-            print('[ERROR][BaseTrainer::__init__]')
-            print('\t createModel failed!')
+            print("[ERROR][BaseTrainer::__init__]")
+            print("\t createModel failed!")
             exit()
 
         if self.local_rank == 0:
             self.ema_model = deepcopy(self.model)
             self.ema_loss = None
 
-        if self.backend == 'nccl':
-            self.model = DDP(self.model, device_ids=[self.local_rank], output_device=self.local_rank)
+        if self.backend == "nccl":
+            self.model = DDP(
+                self.model, device_ids=[self.local_rank], output_device=self.local_rank
+            )
         else:
             self.model = DDP(self.model)
 
         if model_file_path is not None:
             if not self.loadModel(model_file_path, weights_only):
-                print('[ERROR][BaseTrainer::__init__]')
-                print('\t loadModel failed!')
+                print("[ERROR][BaseTrainer::__init__]")
+                print("\t loadModel failed!")
                 exit()
 
         self.optim = AdamW(self.model.parameters(), lr=self.lr)
@@ -165,7 +172,7 @@ class BaseTrainer(ABC):
 
     @abstractmethod
     def createDatasets(self) -> bool:
-        '''
+        """
         self.dataloader_dict = {
             'loader_name': {
                 'dataset': None,
@@ -175,14 +182,14 @@ class BaseTrainer(ABC):
                 'dataset': None,
             },
         }
-        '''
+        """
         pass
 
     @abstractmethod
     def createModel(self) -> bool:
-        '''
+        """
         self.model = None
-        '''
+        """
         pass
 
     def loadModel(self, model_file_path: str, weights_only: bool = False) -> bool:
@@ -192,42 +199,50 @@ class BaseTrainer(ABC):
             print("\t model_file_path:", model_file_path)
             return False
 
-        model_state_dict = torch.load(model_file_path, map_location='cpu')
-        if 'model' in model_state_dict.keys():
+        model_state_dict = torch.load(model_file_path, map_location="cpu")
+        if "model" in model_state_dict.keys():
             try:
                 self.model.module.load_state_dict(model_state_dict["model"])
             except Exception as e:
-                print('[WARN][BaseTrainer::loadModel]')
-                print('\t model state dict not fully match current model! will load matched data only!')
-                print('\t  Exception:')
-                print('\t', e)
-                self.model.module.load_state_dict(model_state_dict["model"], strict=False)
+                print("[WARN][BaseTrainer::loadModel]")
+                print(
+                    "\t model state dict not fully match current model! will load matched data only!"
+                )
+                print("\t  Exception:")
+                print("\t", e)
+                self.model.module.load_state_dict(
+                    model_state_dict["model"], strict=False
+                )
 
         if not weights_only:
-            if 'step' in model_state_dict.keys():
-                self.step = model_state_dict['step']
-            if 'epoch' in model_state_dict.keys():
-                self.epoch = model_state_dict['epoch']
+            if "step" in model_state_dict.keys():
+                self.step = model_state_dict["step"]
+            if "epoch" in model_state_dict.keys():
+                self.epoch = model_state_dict["epoch"]
 
         if self.local_rank == 0:
-            if 'ema_model' in model_state_dict.keys():
+            if "ema_model" in model_state_dict.keys():
                 try:
                     self.ema_model.load_state_dict(model_state_dict["ema_model"])
                 except Exception as e:
-                    print('[WARN][BaseTrainer::loadModel]')
-                    print('\t ema model state dict not fully match current ema model! will load matched data only!')
-                    print('\t  Exception:')
-                    print('\t', e)
-                    self.ema_model.load_state_dict(model_state_dict["ema_model"], strict=False)
+                    print("[WARN][BaseTrainer::loadModel]")
+                    print(
+                        "\t ema model state dict not fully match current ema model! will load matched data only!"
+                    )
+                    print("\t  Exception:")
+                    print("\t", e)
+                    self.ema_model.load_state_dict(
+                        model_state_dict["ema_model"], strict=False
+                    )
 
             if not weights_only:
-                if 'ema_loss' in model_state_dict.keys():
-                    self.ema_loss = model_state_dict['ema_loss']
-                if 'loss_min' in model_state_dict.keys():
-                    self.loss_min = model_state_dict['loss_min']
+                if "ema_loss" in model_state_dict.keys():
+                    self.ema_loss = model_state_dict["ema_loss"]
+                if "loss_min" in model_state_dict.keys():
+                    self.loss_min = model_state_dict["loss_min"]
 
-        print('[INFO][BaseTrainer::loadModel]')
-        print('\t model loaded from:', model_file_path)
+        print("[INFO][BaseTrainer::loadModel]")
+        print("\t model loaded from:", model_file_path)
 
         return True
 
@@ -260,7 +275,9 @@ class BaseTrainer(ABC):
 
     def toEMADecay(self) -> float:
         if self.step <= self.ema_start_step:
-            return self.ema_decay_init + self.step / self.ema_start_step * (self.ema_decay - self.ema_decay_init)
+            return self.ema_decay_init + self.step / self.ema_start_step * (
+                self.ema_decay - self.ema_decay_init
+            )
 
         return self.ema_decay
 
@@ -271,26 +288,27 @@ class BaseTrainer(ABC):
         target_dict = self.ema_model.state_dict()
         for key in source_dict.keys():
             target_dict[key].data.copy_(
-                target_dict[key].data * ema_decay + source_dict[key].data * (1 - ema_decay)
+                target_dict[key].data * ema_decay
+                + source_dict[key].data * (1 - ema_decay)
             )
         return True
 
     def preProcessData(self, data_dict: dict, is_training: bool = True) -> dict:
-        '''
+        """
         if is_training:
             data_dict['new_name'] = new_value
             return data_dict
-        '''
+        """
         return data_dict
 
     @abstractmethod
     def getLossDict(self, data_dict: dict, result_dict: dict) -> dict:
-        '''
+        """
         loss_dict = {
             'loss': 0.0,
         }
         return loss_dict
-        '''
+        """
         pass
 
     def trainStep(
@@ -306,17 +324,17 @@ class BaseTrainer(ABC):
         result_dict = self.postProcessData(data_dict, result_dict, True)
 
         if self.use_amp:
-            with autocast('cuda', dtype=self.amp_dtype):
+            with autocast("cuda", dtype=self.amp_dtype):
                 loss_dict = self.getLossDict(data_dict, result_dict)
         else:
             loss_dict = self.getLossDict(data_dict, result_dict)
 
-        if 'Loss' not in loss_dict.keys():
-            print('[ERROR][BaseTrainer::trainStep]')
-            print('\t loss not found!')
+        if "Loss" not in loss_dict.keys():
+            print("[ERROR][BaseTrainer::trainStep]")
+            print("\t loss not found!")
             exit()
 
-        loss = loss_dict['Loss']
+        loss = loss_dict["Loss"]
 
         accum_loss = loss / self.accum_iter
 
@@ -326,8 +344,8 @@ class BaseTrainer(ABC):
             accum_loss.backward()
 
         if not check_and_replace_nan_in_grad(self.model):
-            print('[ERROR][BaseTrainer::trainStep]')
-            print('\t check_and_replace_nan_in_grad failed!')
+            print("[ERROR][BaseTrainer::trainStep]")
+            print("\t check_and_replace_nan_in_grad failed!")
             exit()
 
         if (self.step + 1) % self.accum_iter == 0:
@@ -358,25 +376,29 @@ class BaseTrainer(ABC):
 
     def trainEpoch(self, data_name: str) -> bool:
         if data_name not in self.dataloader_dict.keys():
-            print('[ERROR][BaseTrainer::trainEpoch]')
-            print('\t data not exist!')
-            print('\t data_name:', data_name)
+            print("[ERROR][BaseTrainer::trainEpoch]")
+            print("\t data not exist!")
+            print("\t data_name:", data_name)
             return False
 
         dataloader_dict = self.dataloader_dict[data_name]
-        dataloader_dict['sampler'].set_epoch(self.epoch)
+        dataloader_dict["sampler"].set_epoch(self.epoch)
 
-        dataloader = dataloader_dict['dataloader']
+        dataloader = dataloader_dict["dataloader"]
 
-        async_dataloader = AsyncDataLoader(dataloader, partial(self.preProcessData, is_training=True), self.num_workers)
+        async_dataloader = AsyncDataLoader(
+            dataloader, partial(self.preProcessData, is_training=True), self.num_workers
+        )
 
         data_prefetcher = DataPrefetcher(async_dataloader, self.local_rank)
 
         try:
             data_dict = data_prefetcher.next()
         except:
-            print('[WARN][BaseTrainer::trainEpoch]')
-            print('\t call next for DataPrefetcher failed! will skip this training epoch!')
+            print("[WARN][BaseTrainer::trainEpoch]")
+            print(
+                "\t call next for DataPrefetcher failed! will skip this training epoch!"
+            )
             return True
 
         if self.local_rank == 0:
@@ -403,7 +425,9 @@ class BaseTrainer(ABC):
                     self.ema_loss = train_loss_dict["Loss"]
                 else:
                     ema_decay = self.toEMADecay()
-                    self.ema_loss = self.ema_loss * ema_decay + train_loss_dict["Loss"] * (1 - ema_decay)
+                    self.ema_loss = self.ema_loss * ema_decay + train_loss_dict[
+                        "Loss"
+                    ] * (1 - ema_decay)
 
                 self.logger.addScalar("Train/EMALoss", self.ema_loss, self.step)
 
@@ -430,8 +454,10 @@ class BaseTrainer(ABC):
             try:
                 data_dict = data_prefetcher.next()
             except:
-                print('[WARN][BaseTrainer::train]')
-                print('\t call next for DataPrefetcher failed! will early stop this training epoch!')
+                print("[WARN][BaseTrainer::train]")
+                print(
+                    "\t call next for DataPrefetcher failed! will early stop this training epoch!"
+                )
                 break
 
         if self.local_rank == 0:
@@ -473,9 +499,9 @@ class BaseTrainer(ABC):
 
         for key, item in ema_loss_dict.items():
             if isinstance(item, torch.Tensor):
-                loss_item_dict['EMA_' + key] = item.clone().detach().cpu().numpy()
+                loss_item_dict["EMA_" + key] = item.clone().detach().cpu().numpy()
             elif not isinstance(item, str):
-                loss_item_dict['EMA_' + key] = item
+                loss_item_dict["EMA_" + key] = item
 
         return loss_item_dict
 
@@ -484,17 +510,21 @@ class BaseTrainer(ABC):
         if self.local_rank != 0:
             return True
 
-        if 'eval' not in self.dataloader_dict.keys():
+        if "eval" not in self.dataloader_dict.keys():
             return True
 
-        dataloader = self.dataloader_dict['eval']['dataloader']
+        dataloader = self.dataloader_dict["eval"]["dataloader"]
 
-        async_dataloader = AsyncDataLoader(dataloader, partial(self.preProcessData, is_training=False), self.num_workers)
+        async_dataloader = AsyncDataLoader(
+            dataloader,
+            partial(self.preProcessData, is_training=False),
+            self.num_workers,
+        )
 
         avg_loss_dict = {}
 
-        print('[INFO][BaseTrainer::evalEpoch]')
-        print('\t start evaluating ...')
+        print("[INFO][BaseTrainer::evalEpoch]")
+        print("\t start evaluating ...")
         pbar = tqdm(total=len(dataloader))
         for data_dict in async_dataloader:
             # data_dict = self.preProcessData(data_dict, False)
@@ -529,17 +559,17 @@ class BaseTrainer(ABC):
 
             if self.best_model_metric_name is not None:
                 if key == self.best_model_metric_name:
-                    self.autoSaveModel('best', avg_item, self.is_metric_lower_better)
+                    self.autoSaveModel("best", avg_item, self.is_metric_lower_better)
 
         return True
 
     @torch.no_grad()
     def sampleModelStep(self, model: nn.Module, model_name: str) -> bool:
-        '''
+        """
         self.logger.addScalar('Sample/' + model_name + '_name', value, self.step)
         self.logger.addPointCloud(model_name + '/name', value, self.step)
         return True
-        '''
+        """
         return True
 
     @torch.no_grad()
@@ -548,7 +578,7 @@ class BaseTrainer(ABC):
             return True
 
         if self.quick_test:
-            self.sampleModelStep(self.model.module, 'Model')
+            self.sampleModelStep(self.model.module, "Model")
             torch.cuda.empty_cache()
             return True
 
@@ -558,7 +588,7 @@ class BaseTrainer(ABC):
         if self.epoch % self.sample_results_freq != 0:
             return True
 
-        self.sampleModelStep(self.model.module, 'Model')
+        self.sampleModelStep(self.model.module, "Model")
         torch.cuda.empty_cache()
         return True
 
@@ -568,7 +598,7 @@ class BaseTrainer(ABC):
             return True
 
         if self.quick_test:
-            self.sampleModelStep(self.model.module, 'EMA')
+            self.sampleModelStep(self.model.module, "EMA")
             torch.cuda.empty_cache()
             return True
 
@@ -578,16 +608,18 @@ class BaseTrainer(ABC):
         if self.epoch % self.sample_results_freq != 0:
             return True
 
-        self.sampleModelStep(self.ema_model, 'EMA')
+        self.sampleModelStep(self.ema_model, "EMA")
         torch.cuda.empty_cache()
         return True
 
-    def postProcessData(self, data_dict: dict, result_dict: dict, is_training: bool = True) -> dict:
-        '''
+    def postProcessData(
+        self, data_dict: dict, result_dict: dict, is_training: bool = True
+    ) -> dict:
+        """
         if is_training:
             result_dict['new_name'] = new_value
             return result_dict
-        '''
+        """
         return result_dict
 
     def train(self) -> bool:
@@ -598,38 +630,45 @@ class BaseTrainer(ABC):
             print("\t start training ...")
 
         while self.step < final_step or self.finetune_step_num < 0:
-
             for data_name in self.dataloader_dict.keys():
-                if data_name == 'eval':
+                if data_name == "eval":
                     continue
 
-                repeat_num = self.dataloader_dict[data_name]['repeat_num']
+                repeat_num = self.dataloader_dict[data_name]["repeat_num"]
 
                 for i in range(repeat_num):
                     if self.local_rank == 0:
-                        print('[INFO][BaseTrainer::train]')
-                        print('\t start training on dataset [', data_name, '] ,', i + 1, '/', repeat_num, '...')
+                        print("[INFO][BaseTrainer::train]")
+                        print(
+                            "\t start training on dataset [",
+                            data_name,
+                            "] ,",
+                            i + 1,
+                            "/",
+                            repeat_num,
+                            "...",
+                        )
 
                     if not self.trainEpoch(data_name):
-                        print('[ERROR][BaseTrainer::train]')
-                        print('\t trainEpoch failed!')
+                        print("[ERROR][BaseTrainer::train]")
+                        print("\t trainEpoch failed!")
                         return False
 
                 self.autoSaveModel("last")
 
                 if not self.evalEpoch():
-                    print('[ERROR][BaseTrainer::train]')
-                    print('\t evalEpoch failed!')
+                    print("[ERROR][BaseTrainer::train]")
+                    print("\t evalEpoch failed!")
                     return False
 
                 if not self.sampleStep():
-                    print('[ERROR][BaseTrainer::train]')
-                    print('\t sampleStep failed!')
+                    print("[ERROR][BaseTrainer::train]")
+                    print("\t sampleStep failed!")
                     return False
 
                 if not self.sampleEMAStep():
-                    print('[ERROR][BaseTrainer::train]')
-                    print('\t sampleEMAStep failed!')
+                    print("[ERROR][BaseTrainer::train]")
+                    print("\t sampleEMAStep failed!")
                     return False
 
         return True
@@ -650,7 +689,9 @@ class BaseTrainer(ABC):
 
         return True
 
-    def autoSaveModel(self, name: str, value: Union[float, None] = None, check_lower: bool = True) -> bool:
+    def autoSaveModel(
+        self, name: str, value: Union[float, None] = None, check_lower: bool = True
+    ) -> bool:
         if self.local_rank != 0:
             return True
 
