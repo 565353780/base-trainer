@@ -161,7 +161,7 @@ class BaseTrainer(ABC):
 
         if self.backend == "nccl":
             self.model = DDP(
-                self.model, device_ids=[self.rank], output_device=self.rank
+                self.model, device_ids=[self.local_rank], output_device=self.local_rank
             )
         else:
             self.model = DDP(self.model)
