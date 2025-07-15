@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 
 from base_trainer.Module.base_trainer import BaseTrainer
 
+
 class Trainer(BaseTrainer):
     def __init__(
         self,
@@ -14,7 +15,7 @@ class Trainer(BaseTrainer):
         model_file_path: Union[str, None] = None,
         weights_only: bool = False,
         device: str = "cuda:0",
-        dtype = torch.float32,
+        dtype=torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
         lr: float = 2e-4,
@@ -60,17 +61,19 @@ class Trainer(BaseTrainer):
         return
 
     def createDatasets(self) -> bool:
-        self.dataloader_dict['name'] =  {
-            'dataset': Dataset(self.dtype),
-            'repeat_num': 1,
+        self.dataloader_dict["name"] = {
+            "dataset": Dataset(self.dtype),
+            "repeat_num": 1,
         }
 
-        self.dataloader_dict['eval'] =  {
-            'dataset': Dataset(self.dtype),
+        self.dataloader_dict["eval"] = {
+            "dataset": Dataset(self.dtype),
         }
 
         # crop data num for faster evaluation
-        self.dataloader_dict['eval']['dataset'].data_list = self.dataloader_dict['eval']['dataset'].data_list[:64]
+        self.dataloader_dict["eval"]["dataset"].data_list = self.dataloader_dict[
+            "eval"
+        ]["dataset"].data_list[:64]
         return True
 
     def createModel(self) -> bool:
@@ -79,15 +82,15 @@ class Trainer(BaseTrainer):
 
     def preProcessData(self, data_dict: dict, is_training: bool = False) -> dict:
         if is_training:
-            data_dict['drop_prob'] = 0.0
+            data_dict["drop_prob"] = 0.0
         else:
-            data_dict['drop_prob'] = 0.0
+            data_dict["drop_prob"] = 0.0
 
         return data_dict
 
     def getLossDict(self, data_dict: dict, result_dict: dict) -> dict:
-        ut = data_dict['ut']
-        vt = result_dict['vt']
+        ut = data_dict["ut"]
+        vt = result_dict["vt"]
 
         loss = torch.pow(vt - ut, 2).mean()
 
@@ -99,31 +102,34 @@ class Trainer(BaseTrainer):
 
     @torch.no_grad()
     def sampleModelStep(self, model: torch.nn.Module, model_name: str) -> bool:
-        if self.local_rank != 0:
+        if self.rank != 0:
             return True
 
         sample_num = 3
-        dataset = self.dataloader_dict['mash']['dataset']
+        dataset = self.dataloader_dict["mash"]["dataset"]
 
         model.eval()
 
         data = dataset.__getitem__(0)
 
         # process data here
-        pcd = data['pcd']
-        mesh = data['mesh']
+        pcd = data["pcd"]
+        mesh = data["mesh"]
 
-        self.logger.addPointCloud(model_name + '/pcd_0', pcd, self.step)
-        self.logger.addMesh(model_name + '/mesh_0', mesh, self.step)
+        self.logger.addPointCloud(model_name + "/pcd_0", pcd, self.step)
+        self.logger.addMesh(model_name + "/mesh_0", mesh, self.step)
 
         return True
+
 
 def demo():
     batch_size = 8
     accum_iter = 20
     num_workers = 16
     model_file_path = None
-    model_file_path = "../../output/20241225_15:14:36/model_last.pth".replace('../../', './')
+    model_file_path = "../../output/20241225_15:14:36/model_last.pth".replace(
+        "../../", "./"
+    )
     weights_only = False
     device = "auto"
     dtype = torch.float32

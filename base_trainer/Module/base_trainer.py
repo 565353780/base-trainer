@@ -24,13 +24,14 @@ from base_trainer.Module.logger import Logger
 
 def setup_distributed(backend: str = "nccl"):
     dist.init_process_group(backend=backend)
-
-    if "SLURM_LOCALID" in os.environ:
-        local_rank = int(os.environ["SLURM_LOCALID"])
-    else:
-        local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    return local_rank
+
+    if "SLURM_PROCID" in os.environ:
+        rank = int(os.environ["SLURM_PROCID"])
+    else:
+        rank = local_rank
+    return rank, local_rank
 
 
 def check_and_replace_nan_in_grad(model):
@@ -69,7 +70,7 @@ class BaseTrainer(ABC):
         quick_test: bool = False,
     ) -> None:
         self.backend = "nccl" if device != "cpu" else "gloo"
-        self.local_rank = setup_distributed(self.backend)
+        self.rank, self.local_rank = setup_distributed(self.backend)
 
         self.batch_size = batch_size
         self.accum_iter = accum_iter
@@ -121,7 +122,7 @@ class BaseTrainer(ABC):
         self.loss_min = float("inf")
 
         self.logger = None
-        if self.local_rank == 0:
+        if self.rank == 0:
             self.logger = Logger()
 
         self.dataloader_dict = {}
@@ -154,13 +155,13 @@ class BaseTrainer(ABC):
             print("\t createModel failed!")
             exit()
 
-        if self.local_rank == 0:
+        if self.rank == 0:
             self.ema_model = deepcopy(self.model)
             self.ema_loss = None
 
         if self.backend == "nccl":
             self.model = DDP(
-                self.model, device_ids=[self.local_rank], output_device=self.local_rank
+                self.model, device_ids=[self.rank], output_device=self.rank
             )
         else:
             self.model = DDP(self.model)
@@ -227,7 +228,7 @@ class BaseTrainer(ABC):
             if "epoch" in model_state_dict.keys():
                 self.epoch = model_state_dict["epoch"]
 
-        if self.local_rank == 0:
+        if self.rank == 0:
             if "ema_model" in model_state_dict.keys():
                 try:
                     self.ema_model.load_state_dict(model_state_dict["ema_model"])
@@ -368,7 +369,7 @@ class BaseTrainer(ABC):
                 self.optim.step()
 
             self.sched.step()
-            if self.local_rank == 0:
+            if self.rank == 0:
                 self.ema()
             self.optim.zero_grad()
 
@@ -397,7 +398,7 @@ class BaseTrainer(ABC):
             dataloader, partial(self.preProcessData, is_training=True), self.num_workers
         )
 
-        data_prefetcher = DataPrefetcher(async_dataloader, self.local_rank)
+        data_prefetcher = DataPrefetcher(async_dataloader, self.rank)
 
         try:
             data_dict = data_prefetcher.next()
@@ -408,7 +409,7 @@ class BaseTrainer(ABC):
             )
             return True
 
-        if self.local_rank == 0:
+        if self.rank == 0:
             pbar = tqdm(total=len(dataloader))
         while data_dict is not None:
             # data_dict = self.preProcessData(data_dict, True)
@@ -419,7 +420,7 @@ class BaseTrainer(ABC):
 
             lr = self.getLr()
 
-            if (self.step + 1) % self.accum_iter == 0 and self.local_rank == 0:
+            if (self.step + 1) % self.accum_iter == 0 and self.rank == 0:
                 for key in train_loss_dict.keys():
                     value = 0
                     for i in range(len(self.loss_dict_list)):
@@ -440,7 +441,7 @@ class BaseTrainer(ABC):
 
                 self.loss_dict_list = []
 
-            if self.local_rank == 0:
+            if self.rank == 0:
                 pbar.set_description(
                     "EPOCH %d LOSS %.6f LR %.4f"
                     % (
@@ -452,7 +453,7 @@ class BaseTrainer(ABC):
 
             self.step += 1
 
-            if self.local_rank == 0:
+            if self.rank == 0:
                 pbar.update(1)
 
             if self.quick_test:
@@ -467,12 +468,12 @@ class BaseTrainer(ABC):
                 )
                 break
 
-        if self.local_rank == 0:
+        if self.rank == 0:
             pbar.close()
 
         self.epoch += 1
 
-        if self.local_rank == 0:
+        if self.rank == 0:
             self.logger.addScalar("Train/Epoch", self.epoch, self.step)
 
         return True
@@ -514,7 +515,7 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def evalEpoch(self) -> bool:
-        if self.local_rank != 0:
+        if self.rank != 0:
             return True
 
         if "eval" not in self.dataloader_dict.keys():
@@ -581,7 +582,7 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def sampleStep(self) -> bool:
-        if self.local_rank != 0:
+        if self.rank != 0:
             return True
 
         if self.quick_test:
@@ -601,7 +602,7 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def sampleEMAStep(self) -> bool:
-        if self.local_rank != 0:
+        if self.rank != 0:
             return True
 
         if self.quick_test:
@@ -632,7 +633,7 @@ class BaseTrainer(ABC):
     def train(self) -> bool:
         final_step = self.step + self.finetune_step_num
 
-        if self.local_rank == 0:
+        if self.rank == 0:
             print("[INFO][BaseTrainer::train]")
             print("\t start training ...")
 
@@ -644,7 +645,7 @@ class BaseTrainer(ABC):
                 repeat_num = self.dataloader_dict[data_name]["repeat_num"]
 
                 for i in range(repeat_num):
-                    if self.local_rank == 0:
+                    if self.rank == 0:
                         print("[INFO][BaseTrainer::train]")
                         print(
                             "\t start training on dataset [",
@@ -699,7 +700,7 @@ class BaseTrainer(ABC):
     def autoSaveModel(
         self, name: str, value: Union[float, None] = None, check_lower: bool = True
     ) -> bool:
-        if self.local_rank != 0:
+        if self.rank != 0:
             return True
 
         if self.save_result_folder_path is None:
