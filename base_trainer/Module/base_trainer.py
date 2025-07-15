@@ -23,11 +23,10 @@ from base_trainer.Module.logger import Logger
 
 
 def setup_distributed(backend: str = "nccl"):
-    if "SLURM_NTASKS" in os.environ:
-        dist.init_process_group(backend=backend)
+    dist.init_process_group(backend=backend)
 
-    if "RANK" in os.environ:
-        local_rank = int(os.environ["RANK"])
+    if "SLURM_LOCALID" in os.environ:
+        local_rank = int(os.environ["SLURM_LOCALID"])
     else:
         local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
