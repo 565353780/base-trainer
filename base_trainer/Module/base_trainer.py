@@ -101,10 +101,13 @@ class BaseTrainer(ABC):
 
         self.scaler = None
         if self.use_amp:
+            """
             if torch.cuda.is_bf16_supported():
                 self.amp_dtype = torch.bfloat16
             else:
                 self.amp_dtype = torch.float16
+            """
+            self.amp_dtype = torch.float16
             self.scaler = GradScaler()
 
         self.step = 0
