@@ -208,7 +208,10 @@ class BaseTrainer(ABC):
             print("\t model_file_path:", model_file_path)
             return False
 
-        model_state_dict = torch.load(model_file_path, map_location="cpu")
+        # FIXME: use weights_only for torch.load only if you trust the model!
+        model_state_dict = torch.load(
+            model_file_path, map_location="cpu", weights_only=False
+        )
         if "model" in model_state_dict.keys():
             try:
                 self.model.module.load_state_dict(model_state_dict["model"])
