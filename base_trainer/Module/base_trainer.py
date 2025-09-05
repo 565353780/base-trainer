@@ -380,7 +380,9 @@ class BaseTrainer(ABC):
         loss_item_dict = {}
         for key, item in loss_dict.items():
             if isinstance(item, torch.Tensor):
-                loss_item_dict[key] = item.clone().detach().cpu().numpy()
+                loss_item_dict[key] = (
+                    item.clone().detach().cpu().to(torch.float32).numpy()
+                )
             elif not isinstance(item, str):
                 loss_item_dict[key] = item
 
@@ -505,13 +507,17 @@ class BaseTrainer(ABC):
 
         for key, item in loss_dict.items():
             if isinstance(item, torch.Tensor):
-                loss_item_dict[key] = item.clone().detach().cpu().numpy()
+                loss_item_dict[key] = (
+                    item.clone().detach().cpu().to(torch.float32).numpy()
+                )
             elif not isinstance(item, str):
                 loss_item_dict[key] = item
 
         for key, item in ema_loss_dict.items():
             if isinstance(item, torch.Tensor):
-                loss_item_dict["EMA_" + key] = item.clone().detach().cpu().numpy()
+                loss_item_dict["EMA_" + key] = (
+                    item.clone().detach().cpu().to(torch.float32).numpy()
+                )
             elif not isinstance(item, str):
                 loss_item_dict["EMA_" + key] = item
 
