@@ -323,6 +323,13 @@ class BaseTrainer(ABC):
         """
         pass
 
+    def getAMPLossDict(self, data_dict: dict, result_dict: dict) -> dict:
+        if self.use_amp:
+            with autocast("cuda", dtype=self.amp_dtype):
+                return self.getLossDict(data_dict, result_dict)
+        else:
+            return self.getLossDict(data_dict, result_dict)
+
     def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
         data_dict = moveTo(data_dict, self.device)
