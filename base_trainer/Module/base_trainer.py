@@ -323,43 +323,38 @@ class BaseTrainer(ABC):
         """
         pass
 
-    def trainStep(
-        self,
-        data_dict: dict,
-    ) -> dict:
+    def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
-
-        data_dict = moveTo(data_dict, self.device, self.dtype)
-
-        result_dict = self.model(data_dict)
-
-        result_dict = self.postProcessData(data_dict, result_dict, True)
+        data_dict = moveTo(data_dict, self.device)
 
         if self.use_amp:
             with autocast("cuda", dtype=self.amp_dtype):
+                result_dict = self.model(data_dict)
+                result_dict = self.postProcessData(data_dict, result_dict, True)
                 loss_dict = self.getLossDict(data_dict, result_dict)
         else:
+            result_dict = self.model(data_dict)
+            result_dict = self.postProcessData(data_dict, result_dict, True)
             loss_dict = self.getLossDict(data_dict, result_dict)
 
-        if "Loss" not in loss_dict.keys():
-            print("[ERROR][BaseTrainer::trainStep]")
-            print("\t loss not found!")
-            exit()
+        if "Loss" not in loss_dict:
+            raise RuntimeError("Loss not found in loss_dict")
 
         loss = loss_dict["Loss"]
-
         accum_loss = loss / self.accum_iter
 
+        # backward
         if self.use_amp:
             self.scaler.scale(accum_loss).backward()
         else:
             accum_loss.backward()
 
         if not check_and_replace_nan_in_grad(self.model):
-            print("[ERROR][BaseTrainer::trainStep]")
-            print("\t check_and_replace_nan_in_grad failed!")
-            exit()
+            print(f"[WARN] step {self.step}: grad NaN detected, skipping update.")
+            self.optim.zero_grad(set_to_none=True)
+            return {}
 
+        # optimizer step (every accum_iter)
         if (self.step + 1) % self.accum_iter == 0:
             if self.use_amp:
                 self.scaler.unscale_(self.optim)
@@ -375,14 +370,13 @@ class BaseTrainer(ABC):
             self.sched.step()
             if self.is_logger:
                 self.ema()
-            self.optim.zero_grad()
+            self.optim.zero_grad(set_to_none=True)
 
+        # detach loss for logging
         loss_item_dict = {}
         for key, item in loss_dict.items():
             if isinstance(item, torch.Tensor):
-                loss_item_dict[key] = (
-                    item.clone().detach().cpu().to(torch.float32).numpy()
-                )
+                loss_item_dict[key] = item.detach().cpu().float().numpy()
             elif not isinstance(item, str):
                 loss_item_dict[key] = item
 
