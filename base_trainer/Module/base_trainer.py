@@ -338,11 +338,11 @@ class BaseTrainer(ABC):
             with autocast("cuda", dtype=self.amp_dtype):
                 result_dict = self.model(data_dict)
                 result_dict = self.postProcessData(data_dict, result_dict, True)
-                loss_dict = self.getLossDict(data_dict, result_dict)
+                loss_dict = self.getAMPLossDict(data_dict, result_dict)
         else:
             result_dict = self.model(data_dict)
             result_dict = self.postProcessData(data_dict, result_dict, True)
-            loss_dict = self.getLossDict(data_dict, result_dict)
+            loss_dict = self.getAMPLossDict(data_dict, result_dict)
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
@@ -498,11 +498,11 @@ class BaseTrainer(ABC):
 
         result_dict = self.postProcessData(data_dict, result_dict, False)
 
-        loss_dict = self.getLossDict(data_dict, result_dict)
+        loss_dict = self.getAMPLossDict(data_dict, result_dict)
 
         ema_result_dict = self.ema_model(data_dict)
 
-        ema_loss_dict = self.getLossDict(data_dict, ema_result_dict)
+        ema_loss_dict = self.getAMPLossDict(data_dict, ema_result_dict)
 
         loss_item_dict = {}
 
