@@ -329,7 +329,7 @@ class BaseTrainer(ABC):
     ) -> dict:
         self.model.train()
 
-        data_dict = moveTo(data_dict, self.device)
+        data_dict = moveTo(data_dict, self.device, self.dtype)
 
         result_dict = self.model(data_dict)
 
