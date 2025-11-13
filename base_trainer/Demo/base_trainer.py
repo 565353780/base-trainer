@@ -102,9 +102,6 @@ class Trainer(BaseTrainer):
 
     @torch.no_grad()
     def sampleModelStep(self, model: torch.nn.Module, model_name: str) -> bool:
-        if self.rank != 0:
-            return True
-
         sample_num = 3
         dataset = self.dataloader_dict["mash"]["dataset"]
 
