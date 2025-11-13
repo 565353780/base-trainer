@@ -21,18 +21,41 @@ from base_trainer.Module.data_prefetcher import DataPrefetcher
 from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 
+def setup_distributed(backend: Union[str, None] = None):
+    """
+    初始化分布式环境，自动兼容 CPU / GPU 训练。
+    返回: (node_rank, local_rank, device)
+    """
 
-def setup_distributed(backend: str = "nccl"):
-    dist.init_process_group(backend=backend)
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
+    # 1️⃣ 自动选择后端
+    if backend is None:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
 
+    # 2️⃣ 初始化进程组（若未初始化）
+    if not dist.is_initialized():
+        dist.init_process_group(backend=backend)
+
+    # 3️⃣ 设置 local_rank
+    if "LOCAL_RANK" in os.environ:
+        local_rank = int(os.environ["LOCAL_RANK"])
+    else:
+        # 单机或CPU模式下默认0
+        local_rank = 0
+
+    # 4️⃣ 选择设备
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+
+    # 5️⃣ 获取节点 rank
     if "SLURM_NODEID" in os.environ:
         node_rank = int(os.environ["SLURM_NODEID"])
     else:
-        node_rank = 0
-    return node_rank, local_rank
+        node_rank = int(os.environ.get("RANK", 0))
 
+    return node_rank, local_rank, device
 
 def check_and_replace_nan_in_grad(model):
     for name, param in model.named_parameters():
@@ -69,16 +92,19 @@ class BaseTrainer(ABC):
         use_amp: bool = False,
         quick_test: bool = False,
     ) -> None:
-        self.backend = "nccl" if device != "cpu" else "gloo"
-        self.node_rank, self.local_rank = setup_distributed(self.backend)
+        if device == 'auto':
+            self.backend = "nccl" if torch.cuda.is_available() else "gloo"
+        elif device == 'cpu':
+            self.backend == 'gloo'
+        else:
+            self.backend = "nccl"
+        self.node_rank, self.local_rank, self.device = setup_distributed(self.backend)
         self.is_logger = (self.node_rank == 0) and (self.local_rank == 0)
 
         self.batch_size = batch_size
         self.accum_iter = accum_iter
         self.num_workers = num_workers
-        if device == "auto":
-            self.device = torch.device("cuda:" + str(self.local_rank))
-        else:
+        if device != "auto":
             self.device = device
         if dtype == "auto":
             if torch.cuda.is_bf16_supported():
@@ -405,7 +431,7 @@ class BaseTrainer(ABC):
             dataloader, partial(self.preProcessData, is_training=True), self.num_workers
         )
 
-        data_prefetcher = DataPrefetcher(async_dataloader, self.local_rank)
+        data_prefetcher = DataPrefetcher(async_dataloader, self.device)
 
         try:
             data_dict = data_prefetcher.next()
