@@ -4,6 +4,7 @@ import trimesh
 import numpy as np
 import open3d as o3d
 from typing import Union
+from copy import deepcopy
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -107,12 +108,17 @@ class Logger(object):
             self.error_outputed = True
             return False
 
-        if isinstance(mesh, o3d.geometry.TriangleMesh):
-            vertices = torch.tensor(np.asarray(mesh.vertices), dtype=torch.float32).unsqueeze(0)
-            faces = torch.tensor(np.asarray(mesh.triangles), dtype=torch.int32).unsqueeze(0)
-        elif isinstance(mesh, trimesh.Trimesh):
-            vertices = torch.tensor(mesh.vertices, dtype=torch.float32).unsqueeze(0)
-            faces = torch.tensor(mesh.faces, dtype=torch.int32).unsqueeze(0)
+        safe_mesh = deepcopy(mesh)
+
+        if isinstance(safe_mesh, o3d.geometry.TriangleMesh):
+            vertices = torch.tensor(np.asarray(safe_mesh.vertices), dtype=torch.float32).unsqueeze(0)
+            faces = torch.tensor(np.asarray(safe_mesh.triangles), dtype=torch.int32).unsqueeze(0)
+            #safe_mesh.compute_vertex_normals()
+            #normals = torch.tensor(np.asarray(safe_mesh.vertex_normals), dtype=torch.float32).unsqueeze(0)
+        elif isinstance(safe_mesh, trimesh.Trimesh):
+            vertices = torch.tensor(safe_mesh.vertices, dtype=torch.float32).unsqueeze(0)
+            faces = torch.tensor(safe_mesh.faces, dtype=torch.int32).unsqueeze(0)
+            #normals = torch.tensor(safe_mesh.vertex_normals, dtype=torch.float32).unsqueeze(0)
         else:
             print('[ERROR][Logger::addMesh]')
             print('\t mesh type not valid!')
