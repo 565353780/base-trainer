@@ -302,6 +302,9 @@ class BaseTrainer(ABC):
             self.logger.setLogFolder(self.save_log_folder_path)
         return True
 
+    def getModelSize(self) -> int:
+        return sum(p.numel() for p in self.model.module.parameters())
+
     def getLr(self) -> float:
         return self.optim.state_dict()["param_groups"][0]["lr"]
 
