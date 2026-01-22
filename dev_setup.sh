@@ -1,5 +1,4 @@
-pip install -U torch torchvision torchaudio
+pip3 install torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/cu124
 
-pip install -U tensorboard prefetch_generator
-
-pip install -U open3d trimesh
+pip install tensorboard prefetch_generator open3d trimesh
