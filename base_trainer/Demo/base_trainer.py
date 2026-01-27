@@ -14,7 +14,7 @@ class Trainer(BaseTrainer):
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
         weights_only: bool = False,
-        device: str = "cuda:0",
+        device: str = "auto",
         dtype=torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
