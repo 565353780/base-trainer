@@ -48,7 +48,6 @@ class Trainer(BaseTrainer):
         best_model_metric_name: Union[str, None] = None,
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
-        use_amp: bool = False,
         quick_test: bool = False,
         fsdp_shard_fn: Union[Callable, None] = None,
         mp_policy: Union[MixedPrecisionPolicy, None] = None,
@@ -77,7 +76,6 @@ class Trainer(BaseTrainer):
             best_model_metric_name,
             is_metric_lower_better,
             sample_results_freq,
-            use_amp,
             quick_test,
             fsdp_shard_fn,
             mp_policy,
@@ -166,7 +164,6 @@ def demo():
     best_model_metric_name = None
     is_metric_lower_better = True
     sample_results_freq = 1
-    use_amp = False
     quick_test = False
     fsdp_shard_fn = default_fsdp_shard_fn
     mp_policy = MixedPrecisionPolicy(
@@ -194,7 +191,6 @@ def demo():
         best_model_metric_name,
         is_metric_lower_better,
         sample_results_freq,
-        use_amp,
         quick_test,
         fsdp_shard_fn,
         mp_policy,

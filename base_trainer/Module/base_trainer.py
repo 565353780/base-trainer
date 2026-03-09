@@ -10,7 +10,6 @@ from functools import partial
 from typing import Union, Callable
 from abc import ABC, abstractmethod
 from torch.optim.adamw import AdamW
-from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.device_mesh import init_device_mesh
@@ -91,7 +90,6 @@ class BaseTrainer(ABC):
         best_model_metric_name: Union[str, None] = None,
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
-        use_amp: bool = False,
         quick_test: bool = False,
         fsdp_shard_fn: Union[Callable, None] = None,
         mp_policy: Union[MixedPrecisionPolicy, None] = None,
@@ -132,23 +130,15 @@ class BaseTrainer(ABC):
         self.best_model_metric_name = best_model_metric_name
         self.is_metric_lower_better = is_metric_lower_better
         self.sample_results_freq = sample_results_freq
-        self.use_amp = use_amp
         self.quick_test = quick_test
 
         self.fsdp_shard_fn = fsdp_shard_fn
-        self.mp_policy = mp_policy or MixedPrecisionPolicy()
-
-        self.scaler = None
-        if self.use_amp:
-            if mp_policy is not None and mp_policy.param_dtype is not None:
-                self.amp_dtype = mp_policy.param_dtype
-                if self.amp_dtype == torch.bfloat16:
-                    self.scaler = None
-                else:
-                    self.scaler = GradScaler()
+        if mp_policy is None:
+            if torch.cuda.is_bf16_supported():
+                mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
             else:
-                self.amp_dtype = torch.float16
-                self.scaler = GradScaler()
+                mp_policy = MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=torch.float32)
+        self.mp_policy = mp_policy
 
         self.step = 0
         self.epoch = 0
@@ -167,11 +157,14 @@ class BaseTrainer(ABC):
             exit()
 
         for key, item in self.dataloader_dict.items():
+            collate_fn = item.get("collate_fn", None)
+
             if key == "eval":
                 self.dataloader_dict[key]["dataloader"] = DataLoader(
                     dataset=item["dataset"],
                     batch_size=batch_size,
                     num_workers=num_workers,
+                    collate_fn=collate_fn,
                 )
                 continue
 
@@ -182,6 +175,7 @@ class BaseTrainer(ABC):
                 batch_size=batch_size,
                 num_workers=num_workers,
                 pin_memory=True,
+                collate_fn=collate_fn,
             )
 
         self.model: nn.Module
@@ -372,11 +366,7 @@ class BaseTrainer(ABC):
         pass
 
     def getAMPLossDict(self, data_dict: dict, result_dict: dict) -> dict:
-        if self.use_amp:
-            with autocast("cuda", dtype=self.amp_dtype):
-                return self.getLossDict(data_dict, result_dict)
-        else:
-            return self.getLossDict(data_dict, result_dict)
+        return self.getLossDict(data_dict, result_dict)
 
     def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
@@ -385,26 +375,16 @@ class BaseTrainer(ABC):
         is_accumulating = (self.step + 1) % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
 
-        if self.use_amp:
-            with autocast("cuda", dtype=self.amp_dtype):
-                result_dict = self.model(data_dict)
-                result_dict = self.postProcessData(data_dict, result_dict, True)
-                loss_dict = self.getAMPLossDict(data_dict, result_dict)
-        else:
-            result_dict = self.model(data_dict)
-            result_dict = self.postProcessData(data_dict, result_dict, True)
-            loss_dict = self.getAMPLossDict(data_dict, result_dict)
+        result_dict = self.model(data_dict)
+        result_dict = self.postProcessData(data_dict, result_dict, True)
+        loss_dict = self.getAMPLossDict(data_dict, result_dict)
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
 
         loss = loss_dict["Loss"]
         accum_loss = loss / self.accum_iter
-
-        if self.use_amp and self.scaler is not None:
-            self.scaler.scale(accum_loss).backward()
-        else:
-            accum_loss.backward()
+        accum_loss.backward()
 
         if not check_and_replace_nan_in_grad(self.model):
             print(f"[WARN] step {self.step}: grad NaN detected, skipping update.")
@@ -412,17 +392,8 @@ class BaseTrainer(ABC):
             return {}
 
         if not is_accumulating:
-            if self.use_amp and self.scaler is not None:
-                self.scaler.unscale_(self.optim)
-
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
-            if self.use_amp and self.scaler is not None:
-                self.scaler.step(self.optim)
-                self.scaler.update()
-            else:
-                self.optim.step()
-
+            self.optim.step()
             self.sched.step()
 
             full_sd = get_model_state_dict(
