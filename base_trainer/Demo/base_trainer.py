@@ -27,6 +27,8 @@ class Trainer(BaseTrainer):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
+        record_cuda_time: bool = False,
+        save_checkpoint_freq: int = -1,
     ) -> None:
         # super params definition here
         # self.name = value
@@ -51,6 +53,8 @@ class Trainer(BaseTrainer):
             is_metric_lower_better,
             sample_results_freq,
             quick_test,
+            record_cuda_time,
+            save_checkpoint_freq,
         )
         return
 
@@ -76,7 +80,7 @@ class Trainer(BaseTrainer):
 
     def preProcessData(self, data_dict: dict, is_training: bool = False) -> dict:
         if is_training:
-            data_dict["drop_prob"] = 0.0
+            data_dict["drop_prob"] = 10.0
         else:
             data_dict["drop_prob"] = 0.0
 
@@ -117,10 +121,10 @@ def demo():
     batch_size = 8
     accum_iter = 20
     num_workers = 16
-    model_file_path = None
     model_file_path = "../../output/20241225_15:14:36/model_last.pth".replace(
         "../../", "./"
     )
+    model_file_path = None
     weights_only = False
     warm_step_num = 2000
     finetune_step_num = -1
@@ -135,6 +139,8 @@ def demo():
     is_metric_lower_better = True
     sample_results_freq = 1
     quick_test = False
+    record_cuda_time = False
+    save_checkpoint_freq = 1000
 
     trainer = Trainer(
         batch_size,
@@ -155,6 +161,8 @@ def demo():
         is_metric_lower_better,
         sample_results_freq,
         quick_test,
+        record_cuda_time,
+        save_checkpoint_freq,
     )
 
     trainer.train()

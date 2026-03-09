@@ -91,11 +91,12 @@ class BaseTrainer(ABC):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
+        record_cuda_time: bool = False,
+        save_checkpoint_freq: int = -1,
         fsdp_shard_fn: Union[Callable, None] = default_fsdp_shard_fn,
         mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32),
-        record_cuda_time: bool = False,
     ) -> None:
         self.backend = "nccl" if torch.cuda.is_available() else "gloo"
         self.node_rank, self.local_rank, self.device = setup_distributed(self.backend)
@@ -136,9 +137,10 @@ class BaseTrainer(ABC):
         self.mp_policy = mp_policy
 
         self.record_cuda_time = record_cuda_time
+        self.save_checkpoint_freq = save_checkpoint_freq
 
-        self.step = 0
-        self.epoch = 0
+        self.step = 1
+        self.epoch = 1
         self.loss_dict_list = []
 
         self.loss_min = float("inf")
@@ -376,7 +378,7 @@ class BaseTrainer(ABC):
         self.model.train()
         data_dict = moveTo(data_dict, self.device)
 
-        is_accumulating = (self.step + 1) % self.accum_iter != 0
+        is_accumulating = self.step % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
 
         if self.is_logger and self.record_cuda_time:
@@ -485,7 +487,7 @@ class BaseTrainer(ABC):
 
             lr = self.getLr()
 
-            if (self.step + 1) % self.accum_iter == 0 and self.is_logger:
+            if self.is_logger and self.step % self.accum_iter == 0:
                 for key in train_loss_dict.keys():
                     value = 0
                     for i in range(len(self.loss_dict_list)):
@@ -519,6 +521,9 @@ class BaseTrainer(ABC):
                     )
                 )
 
+            if self.is_logger and self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
+                self.autoSaveModel(f'{self.step:06d}')
+
             self.step += 1
 
             if self.is_logger:
@@ -530,10 +535,10 @@ class BaseTrainer(ABC):
         if self.is_logger:
             pbar.close()
 
-        self.epoch += 1
-
         if self.is_logger:
             self.logger.addScalar("Train/Epoch", self.epoch, self.step)
+
+        self.epoch += 1
 
         return True
 
