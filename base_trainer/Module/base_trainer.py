@@ -95,6 +95,7 @@ class BaseTrainer(ABC):
         mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32),
+        record_cuda_time: bool = False,
     ) -> None:
         self.backend = "nccl" if torch.cuda.is_available() else "gloo"
         self.node_rank, self.local_rank, self.device = setup_distributed(self.backend)
@@ -134,16 +135,18 @@ class BaseTrainer(ABC):
                 mp_policy = MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=torch.float32)
         self.mp_policy = mp_policy
 
+        self.record_cuda_time = record_cuda_time
+
         self.step = 0
         self.epoch = 0
         self.loss_dict_list = []
 
         self.loss_min = float("inf")
 
-        self.timer = Timer()
-
+        self.timer = None
         self.logger = None
         if self.is_logger:
+            self.timer = Timer()
             self.logger = Logger()
 
         self.dataloader_dict = {}
@@ -369,9 +372,6 @@ class BaseTrainer(ABC):
         """
         pass
 
-    def getAMPLossDict(self, data_dict: dict, result_dict: dict) -> dict:
-        return self.getLossDict(data_dict, result_dict)
-
     def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
         data_dict = moveTo(data_dict, self.device)
@@ -379,9 +379,16 @@ class BaseTrainer(ABC):
         is_accumulating = (self.step + 1) % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
 
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.start('forward')
         result_dict = self.model(data_dict)
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.pause('forward')
+
         result_dict = self.postProcessData(data_dict, result_dict, True)
-        loss_dict = self.getAMPLossDict(data_dict, result_dict)
+        loss_dict = self.getLossDict(data_dict, result_dict)
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
@@ -449,8 +456,23 @@ class BaseTrainer(ABC):
                 )
                 break
 
-            if data_dict is not None:
+            if data_dict is None:
+                if self.is_logger:
+                    pbar.update(1)
+                continue
+
+            if self.is_logger:
+                for key, value in data_dict.items():
+                    if key[:5] in ['Time_']:
+                        self.timer.addTime(key[5:], value.mean().item())
+
+                if self.record_cuda_time:
+                    torch.cuda.synchronize()
+                    self.timer.start('preProcessDataWithGPU')
                 data_dict = self.preProcessDataWithGPU(data_dict, is_training=True)
+                if self.record_cuda_time:
+                    torch.cuda.synchronize()
+                    self.timer.pause('preProcessDataWithGPU')
 
             if data_dict is None:
                 if self.is_logger:
@@ -528,11 +550,11 @@ class BaseTrainer(ABC):
 
         result_dict = self.postProcessData(data_dict, result_dict, False)
 
-        loss_dict = self.getAMPLossDict(data_dict, result_dict)
+        loss_dict = self.getLossDict(data_dict, result_dict)
 
         ema_result_dict = self.ema_model(data_dict)
 
-        ema_loss_dict = self.getAMPLossDict(data_dict, ema_result_dict)
+        ema_loss_dict = self.getLossDict(data_dict, ema_result_dict)
 
         loss_item_dict = {}
 
