@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from base_trainer.Method.device import moveTo
 from base_trainer.Method.time import getCurrentTime
+from base_trainer.Method.fsdp import default_fsdp_shard_fn
 from base_trainer.Method.path import createFileFolder, renameFile, removeFile
 from base_trainer.Module.data_prefetcher import DataPrefetcher
 from base_trainer.Module.async_dataloader import AsyncDataLoader
@@ -77,8 +78,6 @@ class BaseTrainer(ABC):
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
         weights_only: bool = False,
-        device: str = "auto",
-        dtype=torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
         lr: float = 2e-4,
@@ -92,30 +91,24 @@ class BaseTrainer(ABC):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
-        fsdp_shard_fn: Union[Callable, None] = None,
-        mp_policy: Union[MixedPrecisionPolicy, None] = None,
+        fsdp_shard_fn: Union[Callable, None] = default_fsdp_shard_fn,
+        mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32),
     ) -> None:
-        if device == 'auto':
-            self.backend = "nccl" if torch.cuda.is_available() else "gloo"
-        elif device == 'cpu':
-            self.backend = 'gloo'
-        else:
-            self.backend = "nccl"
+        self.backend = "nccl" if torch.cuda.is_available() else "gloo"
         self.node_rank, self.local_rank, self.device = setup_distributed(self.backend)
         self.is_logger = (self.node_rank == 0) and (self.local_rank == 0)
 
         self.batch_size = batch_size
         self.accum_iter = accum_iter
         self.num_workers = num_workers
-        if device != "auto":
-            self.device = device
-        if dtype == "auto":
-            if torch.cuda.is_bf16_supported():
-                self.dtype = torch.bfloat16
-            else:
-                self.dtype = torch.float16
+
+        if torch.cuda.is_bf16_supported():
+            self.dtype = torch.bfloat16
         else:
-            self.dtype = dtype
+            self.dtype = torch.float16
+
         self.warm_step_num = warm_step_num / accum_iter
         self.finetune_step_num = finetune_step_num
         self.lr = (

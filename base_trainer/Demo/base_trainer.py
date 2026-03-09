@@ -1,29 +1,9 @@
 import torch
 from torch import nn
-from typing import Union, Callable
+from typing import Union
 from torch.utils.data import Dataset
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.distributed.device_mesh import DeviceMesh
 
 from base_trainer.Module.base_trainer import BaseTrainer
-
-
-def default_fsdp_shard_fn(
-    model: nn.Module,
-    device_mesh: DeviceMesh,
-    mp_policy: MixedPrecisionPolicy,
-) -> None:
-    """Apply fully_shard bottom-up to each sub-module before the root.
-
-    For a Transformer-like model you would iterate over layers:
-        for layer in model.layers:
-            fully_shard(layer, mesh=device_mesh, mp_policy=mp_policy)
-
-    The root module is sharded automatically by BaseTrainer after this
-    function returns, so do NOT call fully_shard on the root here.
-    """
-    for child in model.children():
-        fully_shard(child, mesh=device_mesh, mp_policy=mp_policy)
 
 
 class Trainer(BaseTrainer):
@@ -34,8 +14,6 @@ class Trainer(BaseTrainer):
         num_workers: int = 16,
         model_file_path: Union[str, None] = None,
         weights_only: bool = False,
-        device: str = "auto",
-        dtype=torch.float32,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
         lr: float = 2e-4,
@@ -49,8 +27,6 @@ class Trainer(BaseTrainer):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
-        fsdp_shard_fn: Union[Callable, None] = None,
-        mp_policy: Union[MixedPrecisionPolicy, None] = None,
     ) -> None:
         # super params definition here
         # self.name = value
@@ -62,8 +38,6 @@ class Trainer(BaseTrainer):
             num_workers,
             model_file_path,
             weights_only,
-            device,
-            dtype,
             warm_step_num,
             finetune_step_num,
             lr,
@@ -77,8 +51,6 @@ class Trainer(BaseTrainer):
             is_metric_lower_better,
             sample_results_freq,
             quick_test,
-            fsdp_shard_fn,
-            mp_policy,
         )
         return
 
@@ -150,8 +122,6 @@ def demo():
         "../../", "./"
     )
     weights_only = False
-    device = "auto"
-    dtype = torch.float32
     warm_step_num = 2000
     finetune_step_num = -1
     lr = 2e-4
@@ -165,11 +135,6 @@ def demo():
     is_metric_lower_better = True
     sample_results_freq = 1
     quick_test = False
-    fsdp_shard_fn = default_fsdp_shard_fn
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16,
-        reduce_dtype=torch.float32,
-    )
 
     trainer = Trainer(
         batch_size,
@@ -177,8 +142,6 @@ def demo():
         num_workers,
         model_file_path,
         weights_only,
-        device,
-        dtype,
         warm_step_num,
         finetune_step_num,
         lr,
@@ -192,8 +155,6 @@ def demo():
         is_metric_lower_better,
         sample_results_freq,
         quick_test,
-        fsdp_shard_fn,
-        mp_policy,
     )
 
     trainer.train()
