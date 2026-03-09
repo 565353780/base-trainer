@@ -7,8 +7,8 @@ from torch import nn
 from tqdm import tqdm
 from copy import deepcopy
 from functools import partial
-from typing import Union, Callable
 from abc import ABC, abstractmethod
+from typing import Union, Callable, Optional, Dict
 from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
@@ -343,7 +343,15 @@ class BaseTrainer(ABC):
             )
         return True
 
-    def preProcessData(self, data_dict: dict, is_training: bool = True) -> dict:
+    def preProcessData(self, data_dict: dict, is_training: bool = True) -> Optional[Dict]:
+        """
+        if is_training:
+            data_dict['new_name'] = new_value
+            return data_dict
+        """
+        return data_dict
+
+    def preProcessDataWithGPU(self, data_dict: dict, is_training: bool = True) -> Optional[Dict]:
         """
         if is_training:
             data_dict['new_name'] = new_value
@@ -429,18 +437,26 @@ class BaseTrainer(ABC):
 
         data_prefetcher = DataPrefetcher(async_dataloader, self.device)
 
-        try:
-            data_dict = data_prefetcher.next()
-        except:
-            print("[WARN][BaseTrainer::trainEpoch]")
-            print(
-                "\t call next for DataPrefetcher failed! will skip this training epoch!"
-            )
-            return True
-
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
-        while data_dict is not None:
+        while not data_prefetcher.exhausted:
+            try:
+                data_dict = data_prefetcher.next()
+            except:
+                print("[WARN][BaseTrainer::trainEpoch]")
+                print(
+                    "\t call next for DataPrefetcher failed! will early stop this training epoch!"
+                )
+                break
+
+            if data_dict is not None:
+                data_dict = self.preProcessDataWithGPU(data_dict, is_training=True)
+
+            if data_dict is None:
+                if self.is_logger:
+                    pbar.update(1)
+                continue
+
             train_loss_dict = self.trainStep(data_dict)
 
             self.loss_dict_list.append(train_loss_dict)
@@ -487,15 +503,6 @@ class BaseTrainer(ABC):
                 pbar.update(1)
 
             if self.quick_test:
-                break
-
-            try:
-                data_dict = data_prefetcher.next()
-            except:
-                print("[WARN][BaseTrainer::train]")
-                print(
-                    "\t call next for DataPrefetcher failed! will early stop this training epoch!"
-                )
                 break
 
         if self.is_logger:
@@ -569,6 +576,14 @@ class BaseTrainer(ABC):
         print("\t start evaluating ...")
         pbar = tqdm(total=len(dataloader))
         for data_dict in async_dataloader:
+            if data_dict is not None:
+                data_dict = moveTo(data_dict, self.device)
+                data_dict = self.preProcessDataWithGPU(data_dict, is_training=False)
+
+            if data_dict is None:
+                pbar.update(1)
+                continue
+
             eval_loss_dict = self.evalStep(data_dict)
 
             for key, item in eval_loss_dict.items():

@@ -1,5 +1,9 @@
 import torch
 
+
+_EXHAUSTED = object()
+
+
 class DataPrefetcher:
     def __init__(self, loader, device: str = "cpu"):
         self.loader = iter(loader)
@@ -7,14 +11,21 @@ class DataPrefetcher:
         self.use_cuda = self.device.type != "cpu"
         if self.use_cuda:
             self.stream = torch.cuda.Stream()
-        self.batch = None
+        self.batch = _EXHAUSTED
         self.preload()
+
+    @property
+    def exhausted(self) -> bool:
+        return self.batch is _EXHAUSTED
 
     def preload(self):
         try:
             self.batch = next(self.loader)
         except StopIteration:
-            self.batch = None
+            self.batch = _EXHAUSTED
+            return
+
+        if self.batch is None:
             return
 
         # GPU 模式：异步预取
@@ -30,9 +41,9 @@ class DataPrefetcher:
                     self.batch[k] = self.batch[k].to(device=self.device)
 
     def next(self):
-        if self.batch is None:
+        if self.batch is _EXHAUSTED:
             return None
-        if self.use_cuda:
+        if self.use_cuda and self.batch is not None:
             torch.cuda.current_stream().wait_stream(self.stream)
         batch = self.batch
         self.preload()
