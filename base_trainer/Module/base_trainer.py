@@ -26,6 +26,7 @@ from base_trainer.Method.path import createFileFolder, renameFile, removeFile
 from base_trainer.Module.data_prefetcher import DataPrefetcher
 from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
+from base_trainer.Module.timer import Timer
 
 
 def setup_distributed(backend: Union[str, None] = None):
@@ -145,6 +146,8 @@ class BaseTrainer(ABC):
         self.loss_dict_list = []
 
         self.loss_min = float("inf")
+
+        self.timer = Timer()
 
         self.logger = None
         if self.is_logger:
@@ -473,6 +476,9 @@ class BaseTrainer(ABC):
                 self.loss_dict_list = []
 
             if self.is_logger:
+                for name in self.timer.time_sums:
+                    self.logger.addScalar(f"Time/{name}", self.timer.lastTime(name), self.step)
+
                 pbar.set_description(
                     "EPOCH %d LOSS %.6f LR %.4f"
                     % (
