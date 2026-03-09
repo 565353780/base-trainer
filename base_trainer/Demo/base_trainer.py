@@ -1,9 +1,29 @@
 import torch
 from torch import nn
-from typing import Union
+from typing import Union, Callable
 from torch.utils.data import Dataset
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.device_mesh import DeviceMesh
 
 from base_trainer.Module.base_trainer import BaseTrainer
+
+
+def default_fsdp_shard_fn(
+    model: nn.Module,
+    device_mesh: DeviceMesh,
+    mp_policy: MixedPrecisionPolicy,
+) -> None:
+    """Apply fully_shard bottom-up to each sub-module before the root.
+
+    For a Transformer-like model you would iterate over layers:
+        for layer in model.layers:
+            fully_shard(layer, mesh=device_mesh, mp_policy=mp_policy)
+
+    The root module is sharded automatically by BaseTrainer after this
+    function returns, so do NOT call fully_shard on the root here.
+    """
+    for child in model.children():
+        fully_shard(child, mesh=device_mesh, mp_policy=mp_policy)
 
 
 class Trainer(BaseTrainer):
@@ -30,6 +50,8 @@ class Trainer(BaseTrainer):
         sample_results_freq: int = -1,
         use_amp: bool = False,
         quick_test: bool = False,
+        fsdp_shard_fn: Union[Callable, None] = None,
+        mp_policy: Union[MixedPrecisionPolicy, None] = None,
     ) -> None:
         # super params definition here
         # self.name = value
@@ -57,6 +79,8 @@ class Trainer(BaseTrainer):
             sample_results_freq,
             use_amp,
             quick_test,
+            fsdp_shard_fn,
+            mp_policy,
         )
         return
 
@@ -144,6 +168,11 @@ def demo():
     sample_results_freq = 1
     use_amp = False
     quick_test = False
+    fsdp_shard_fn = default_fsdp_shard_fn
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
+    )
 
     trainer = Trainer(
         batch_size,
@@ -167,6 +196,8 @@ def demo():
         sample_results_freq,
         use_amp,
         quick_test,
+        fsdp_shard_fn,
+        mp_policy,
     )
 
     trainer.train()

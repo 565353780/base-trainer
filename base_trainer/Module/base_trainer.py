@@ -2,16 +2,23 @@ import os
 import torch
 import numpy as np
 import torch.distributed as dist
+
 from torch import nn
 from tqdm import tqdm
-from typing import Union
 from copy import deepcopy
 from functools import partial
+from typing import Union, Callable
 from abc import ABC, abstractmethod
 from torch.optim.adamw import AdamW
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    set_model_state_dict,
+    StateDictOptions,
+)
 from torch.utils.data import DataLoader, DistributedSampler
 
 from base_trainer.Method.device import moveTo
@@ -21,35 +28,30 @@ from base_trainer.Module.data_prefetcher import DataPrefetcher
 from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 
+
 def setup_distributed(backend: Union[str, None] = None):
     """
     初始化分布式环境，自动兼容 CPU / GPU 训练。
     返回: (node_rank, local_rank, device)
     """
 
-    # 1️⃣ 自动选择后端
     if backend is None:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
 
-    # 2️⃣ 初始化进程组（若未初始化）
     if not dist.is_initialized():
         dist.init_process_group(backend=backend)
 
-    # 3️⃣ 设置 local_rank
     if "LOCAL_RANK" in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
     else:
-        # 单机或CPU模式下默认0
         local_rank = 0
 
-    # 4️⃣ 选择设备
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cpu")
 
-    # 5️⃣ 获取节点 rank
     if "SLURM_NODEID" in os.environ:
         node_rank = int(os.environ["SLURM_NODEID"])
     else:
@@ -91,11 +93,13 @@ class BaseTrainer(ABC):
         sample_results_freq: int = -1,
         use_amp: bool = False,
         quick_test: bool = False,
+        fsdp_shard_fn: Union[Callable, None] = None,
+        mp_policy: Union[MixedPrecisionPolicy, None] = None,
     ) -> None:
         if device == 'auto':
             self.backend = "nccl" if torch.cuda.is_available() else "gloo"
         elif device == 'cpu':
-            self.backend == 'gloo'
+            self.backend = 'gloo'
         else:
             self.backend = "nccl"
         self.node_rank, self.local_rank, self.device = setup_distributed(self.backend)
@@ -131,16 +135,20 @@ class BaseTrainer(ABC):
         self.use_amp = use_amp
         self.quick_test = quick_test
 
+        self.fsdp_shard_fn = fsdp_shard_fn
+        self.mp_policy = mp_policy or MixedPrecisionPolicy()
+
         self.scaler = None
         if self.use_amp:
-            """
-            if torch.cuda.is_bf16_supported():
-                self.amp_dtype = torch.bfloat16
+            if mp_policy is not None and mp_policy.param_dtype is not None:
+                self.amp_dtype = mp_policy.param_dtype
+                if self.amp_dtype == torch.bfloat16:
+                    self.scaler = None
+                else:
+                    self.scaler = GradScaler()
             else:
                 self.amp_dtype = torch.float16
-            """
-            self.amp_dtype = torch.float16
-            self.scaler = GradScaler()
+                self.scaler = GradScaler()
 
         self.step = 0
         self.epoch = 0
@@ -186,12 +194,12 @@ class BaseTrainer(ABC):
             self.ema_model = deepcopy(self.model)
             self.ema_loss = None
 
-        if self.backend == "nccl":
-            self.model = DDP(
-                self.model, device_ids=[self.local_rank], output_device=self.local_rank
-            )
-        else:
-            self.model = DDP(self.model)
+        device_type = "cuda" if self.backend == "nccl" else "cpu"
+        self.device_mesh = init_device_mesh(device_type, (dist.get_world_size(),))
+
+        if self.fsdp_shard_fn is not None:
+            self.fsdp_shard_fn(self.model, self.device_mesh, self.mp_policy)
+        fully_shard(self.model, mesh=self.device_mesh, mp_policy=self.mp_policy)
 
         if model_file_path is not None:
             if not self.loadModel(model_file_path, weights_only):
@@ -234,13 +242,19 @@ class BaseTrainer(ABC):
             print("\t model_file_path:", model_file_path)
             return False
 
-        # FIXME: use weights_only for torch.load only if you trust the model!
         model_state_dict = torch.load(
             model_file_path, map_location="cpu", weights_only=False
         )
         if "model" in model_state_dict.keys():
             try:
-                self.model.module.load_state_dict(model_state_dict["model"])
+                set_model_state_dict(
+                    self.model,
+                    model_state_dict=model_state_dict["model"],
+                    options=StateDictOptions(
+                        full_state_dict=True,
+                        broadcast_from_rank0=True,
+                    ),
+                )
             except Exception as e:
                 print("[WARN][BaseTrainer::loadModel]")
                 print(
@@ -248,8 +262,14 @@ class BaseTrainer(ABC):
                 )
                 print("\t  Exception:")
                 print("\t", e)
-                self.model.module.load_state_dict(
-                    model_state_dict["model"], strict=False
+                set_model_state_dict(
+                    self.model,
+                    model_state_dict=model_state_dict["model"],
+                    options=StateDictOptions(
+                        full_state_dict=True,
+                        broadcast_from_rank0=True,
+                        strict=False,
+                    ),
                 )
 
         if not weights_only:
@@ -303,7 +323,7 @@ class BaseTrainer(ABC):
         return True
 
     def getModelSize(self) -> int:
-        return sum(p.numel() for p in self.model.module.parameters())
+        return sum(p.numel() for p in self.model.parameters())
 
     def getLr(self) -> float:
         return self.optim.state_dict()["param_groups"][0]["lr"]
@@ -322,10 +342,9 @@ class BaseTrainer(ABC):
 
         return self.ema_decay
 
-    def ema(self) -> bool:
+    def ema(self, source_dict: dict) -> bool:
         ema_decay = self.toEMADecay()
 
-        source_dict = self.model.module.state_dict()
         target_dict = self.ema_model.state_dict()
         for key in source_dict.keys():
             target_dict[key].data.copy_(
@@ -363,6 +382,9 @@ class BaseTrainer(ABC):
         self.model.train()
         data_dict = moveTo(data_dict, self.device)
 
+        is_accumulating = (self.step + 1) % self.accum_iter != 0
+        self.model.set_requires_gradient_sync(not is_accumulating)
+
         if self.use_amp:
             with autocast("cuda", dtype=self.amp_dtype):
                 result_dict = self.model(data_dict)
@@ -379,8 +401,7 @@ class BaseTrainer(ABC):
         loss = loss_dict["Loss"]
         accum_loss = loss / self.accum_iter
 
-        # backward
-        if self.use_amp:
+        if self.use_amp and self.scaler is not None:
             self.scaler.scale(accum_loss).backward()
         else:
             accum_loss.backward()
@@ -390,25 +411,30 @@ class BaseTrainer(ABC):
             self.optim.zero_grad(set_to_none=True)
             return {}
 
-        # optimizer step (every accum_iter)
-        if (self.step + 1) % self.accum_iter == 0:
-            if self.use_amp:
+        if not is_accumulating:
+            if self.use_amp and self.scaler is not None:
                 self.scaler.unscale_(self.optim)
 
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-            if self.use_amp:
+            if self.use_amp and self.scaler is not None:
                 self.scaler.step(self.optim)
                 self.scaler.update()
             else:
                 self.optim.step()
 
             self.sched.step()
+
+            full_sd = get_model_state_dict(
+                self.model,
+                options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+            )
             if self.is_logger:
-                self.ema()
+                self.ema(full_sd)
+            del full_sd
+
             self.optim.zero_grad(set_to_none=True)
 
-        # detach loss for logging
         loss_item_dict = {}
         for key, item in loss_dict.items():
             if isinstance(item, torch.Tensor):
@@ -448,8 +474,6 @@ class BaseTrainer(ABC):
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
         while data_dict is not None:
-            # data_dict = self.preProcessData(data_dict, True)
-
             train_loss_dict = self.trainStep(data_dict)
 
             self.loss_dict_list.append(train_loss_dict)
@@ -523,7 +547,7 @@ class BaseTrainer(ABC):
 
         data_dict = moveTo(data_dict, self.device)
 
-        result_dict = self.model.module(data_dict)
+        result_dict = self.model(data_dict)
 
         result_dict = self.postProcessData(data_dict, result_dict, False)
 
@@ -575,8 +599,6 @@ class BaseTrainer(ABC):
         print("\t start evaluating ...")
         pbar = tqdm(total=len(dataloader))
         for data_dict in async_dataloader:
-            # data_dict = self.preProcessData(data_dict, False)
-
             eval_loss_dict = self.evalStep(data_dict)
 
             for key, item in eval_loss_dict.items():
@@ -626,7 +648,7 @@ class BaseTrainer(ABC):
             return True
 
         if self.quick_test:
-            self.sampleModelStep(self.model.module, "Model")
+            self.sampleModelStep(self.model, "Model")
             torch.cuda.empty_cache()
             return True
 
@@ -636,7 +658,7 @@ class BaseTrainer(ABC):
         if self.epoch % self.sample_results_freq != 0:
             return True
 
-        self.sampleModelStep(self.model.module, "Model")
+        self.sampleModelStep(self.model, "Model")
         torch.cuda.empty_cache()
         return True
 
@@ -646,7 +668,7 @@ class BaseTrainer(ABC):
             return True
 
         if self.quick_test:
-            self.sampleModelStep(self.model.module, "EMA")
+            self.sampleModelStep(self.ema_model, "EMA")
             torch.cuda.empty_cache()
             return True
 
@@ -721,51 +743,63 @@ class BaseTrainer(ABC):
 
         return True
 
-    def saveModel(self, save_model_file_path: str) -> bool:
-        createFileFolder(save_model_file_path)
+    def saveModel(self, save_model_file_path: Union[str, None] = None) -> bool:
+        full_model_sd = get_model_state_dict(
+            self.model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
 
-        model_state_dict = {
-            "model": self.model.module.state_dict(),
-            "ema_model": self.ema_model.state_dict(),
-            "ema_loss": self.ema_loss,
-            "step": self.step,
-            "epoch": self.epoch,
-            "loss_min": self.loss_min,
-        }
+        if self.is_logger and save_model_file_path is not None:
+            createFileFolder(save_model_file_path)
 
-        torch.save(model_state_dict, save_model_file_path)
+            model_state_dict = {
+                "model": full_model_sd,
+                "ema_model": self.ema_model.state_dict(),
+                "ema_loss": self.ema_loss,
+                "step": self.step,
+                "epoch": self.epoch,
+                "loss_min": self.loss_min,
+            }
 
+            torch.save(model_state_dict, save_model_file_path)
+
+        dist.barrier()
         return True
 
     def autoSaveModel(
         self, name: str, value: Union[float, None] = None, check_lower: bool = True
     ) -> bool:
-        if not self.is_logger:
-            return True
+        skip = False
 
-        if self.save_result_folder_path is None:
-            return False
+        if not self.is_logger or self.save_result_folder_path is None:
+            skip = True
 
-        if value is not None:
+        if not skip and value is not None:
             if self.loss_min == float("inf"):
                 if not check_lower:
                     self.loss_min = -float("inf")
 
             if check_lower:
                 if value > self.loss_min:
-                    return False
+                    skip = True
             elif value < self.loss_min:
-                return False
+                skip = True
 
-            self.loss_min = value
+            if not skip:
+                self.loss_min = value
 
-        save_model_file_path = self.save_result_folder_path + "model_" + name + ".pth"
-
-        tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
+        save_model_file_path = None
+        tmp_save_model_file_path = None
+        if not skip:
+            save_model_file_path = (
+                self.save_result_folder_path + "model_" + name + ".pth"
+            )
+            tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
 
         self.saveModel(tmp_save_model_file_path)
 
-        removeFile(save_model_file_path)
-        renameFile(tmp_save_model_file_path, save_model_file_path)
+        if not skip:
+            removeFile(save_model_file_path)
+            renameFile(tmp_save_model_file_path, save_model_file_path)
 
-        return True
+        return not skip
