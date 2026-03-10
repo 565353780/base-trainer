@@ -578,7 +578,7 @@ class BaseTrainer(ABC):
 
             if self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
                 self.autoSaveModel(f'{self.step:06d}')
-                exit()
+                self.autoSaveModel('last')
 
             self.step += 1
 
