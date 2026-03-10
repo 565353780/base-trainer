@@ -475,6 +475,8 @@ class BaseTrainer(ABC):
                 if self.record_cuda_time:
                     torch.cuda.synchronize()
                     self.timer.pause('preProcessDataWithGPU')
+            else:
+                data_dict = self.preProcessDataWithGPU(data_dict, is_training=True)
 
             if data_dict is None:
                 if self.is_logger:
