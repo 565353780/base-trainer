@@ -424,7 +424,14 @@ class BaseTrainer(ABC):
 
         loss = loss_dict["Loss"]
         accum_loss = loss / self.accum_iter
+
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.start('backward')
         accum_loss.backward()
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.pause('backward')
 
         if not check_and_replace_nan_in_grad(self.model):
             print(f"[WARN] step {self.step}: grad NaN detected, skipping update.")
