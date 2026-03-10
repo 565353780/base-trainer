@@ -93,6 +93,7 @@ class BaseTrainer(ABC):
         quick_test: bool = False,
         record_cuda_time: bool = False,
         save_checkpoint_freq: int = -1,
+        prefetch_factor: int = 4,
         fsdp_shard_fn: Union[Callable, None] = default_fsdp_shard_fn,
         mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
@@ -143,6 +144,7 @@ class BaseTrainer(ABC):
 
         self.record_cuda_time = record_cuda_time
         self.save_checkpoint_freq = save_checkpoint_freq
+        self.prefetch_factor = prefetch_factor
 
         self.step = 1
         self.epoch = 1
@@ -170,6 +172,7 @@ class BaseTrainer(ABC):
                     dataset=item["dataset"],
                     batch_size=batch_size,
                     num_workers=num_workers,
+                    prefetch_factor=prefetch_factor if num_workers > 0 else None,
                     collate_fn=collate_fn,
                 )
                 continue
@@ -180,6 +183,7 @@ class BaseTrainer(ABC):
                 sampler=self.dataloader_dict[key]["sampler"],
                 batch_size=batch_size,
                 num_workers=num_workers,
+                prefetch_factor=prefetch_factor if num_workers > 0 else None,
                 pin_memory=True,
                 collate_fn=collate_fn,
             )
@@ -486,7 +490,10 @@ class BaseTrainer(ABC):
         dataloader = dataloader_dict["dataloader"]
 
         async_dataloader = AsyncDataLoader(
-            dataloader, partial(self.preProcessData, is_training=True), self.num_workers
+            dataloader,
+            partial(self.preProcessData, is_training=True),
+            max_workers=self.num_workers,
+            prefetch_depth=self.prefetch_factor,
         )
 
         data_prefetcher = DataPrefetcher(async_dataloader, self.device)
@@ -650,7 +657,8 @@ class BaseTrainer(ABC):
         async_dataloader = AsyncDataLoader(
             dataloader,
             partial(self.preProcessData, is_training=False),
-            self.num_workers,
+            max_workers=self.num_workers,
+            prefetch_depth=self.prefetch_factor,
         )
 
         avg_loss_dict = {}
