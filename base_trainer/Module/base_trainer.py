@@ -5,10 +5,9 @@ import torch.distributed as dist
 
 from torch import nn
 from tqdm import tqdm
-from copy import deepcopy
 from functools import partial
 from abc import ABC, abstractmethod
-from typing import Union, Callable, Optional, Dict
+from typing import Union, Callable, Optional, Dict, List
 from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
@@ -186,7 +185,6 @@ class BaseTrainer(ABC):
             exit()
 
         if self.is_logger:
-            self.ema_model = deepcopy(self.model)
             self.ema_loss = None
 
         device_type = "cuda" if self.backend == "nccl" else "cpu"
@@ -201,6 +199,8 @@ class BaseTrainer(ABC):
                 print("[ERROR][BaseTrainer::__init__]")
                 print("\t loadModel failed!")
                 exit()
+
+        self._init_ema_shards()
 
         self.optim = AdamW(self.model.parameters(), lr=self.lr)
         self.sched = LambdaLR(self.optim, lr_lambda=self.warmup_lr)
@@ -273,26 +273,15 @@ class BaseTrainer(ABC):
             if "epoch" in model_state_dict.keys():
                 self.epoch = model_state_dict["epoch"]
 
-        if self.is_logger:
-            if "ema_model" in model_state_dict.keys():
-                try:
-                    self.ema_model.load_state_dict(model_state_dict["ema_model"])
-                except Exception as e:
-                    print("[WARN][BaseTrainer::loadModel]")
-                    print(
-                        "\t ema model state dict not fully match current ema model! will load matched data only!"
-                    )
-                    print("\t  Exception:")
-                    print("\t", e)
-                    self.ema_model.load_state_dict(
-                        model_state_dict["ema_model"], strict=False
-                    )
+        if "ema_model" in model_state_dict.keys():
+            self._pending_ema_state_dict = model_state_dict["ema_model"]
 
-            if not weights_only:
+        if not weights_only:
+            if self.is_logger:
                 if "ema_loss" in model_state_dict.keys():
                     self.ema_loss = model_state_dict["ema_loss"]
-                if "loss_min" in model_state_dict.keys():
-                    self.loss_min = model_state_dict["loss_min"]
+            if "loss_min" in model_state_dict.keys():
+                self.loss_min = model_state_dict["loss_min"]
 
         print("[INFO][BaseTrainer::loadModel]")
         print("\t model loaded from:", model_file_path)
@@ -329,6 +318,45 @@ class BaseTrainer(ABC):
 
         return min(step, self.warm_step_num) / self.warm_step_num
 
+    def _init_ema_shards(self) -> None:
+        """Snapshot every FSDP-sharded parameter to a CPU clone.
+
+        Called after FSDP wrapping (and optional checkpoint loading) so that
+        each rank holds only its own shard — zero extra GPU memory.
+
+        If a full EMA state dict was cached from a checkpoint, we temporarily
+        load it into the FSDP model to obtain the correct shard layout, copy
+        the shards out, then restore the original training weights.
+        """
+        pending_sd = getattr(self, "_pending_ema_state_dict", None)
+
+        if pending_sd is not None:
+            orig_shards = [p.data.detach().clone() for p in self.model.parameters()]
+
+            set_model_state_dict(
+                self.model,
+                model_state_dict=pending_sd,
+                options=StateDictOptions(
+                    full_state_dict=True,
+                    broadcast_from_rank0=True,
+                    strict=False,
+                ),
+            )
+
+            self._ema_params: List[torch.Tensor] = []
+            for p in self.model.parameters():
+                self._ema_params.append(p.data.detach().float().cpu().clone())
+
+            for p, orig in zip(self.model.parameters(), orig_shards):
+                p.data.copy_(orig)
+            del orig_shards
+
+            del self._pending_ema_state_dict
+        else:
+            self._ema_params: List[torch.Tensor] = []
+            for p in self.model.parameters():
+                self._ema_params.append(p.data.detach().float().cpu().clone())
+
     def toEMADecay(self) -> float:
         if self.step <= self.ema_start_step:
             return self.ema_decay_init + self.step / self.ema_start_step * (
@@ -337,15 +365,14 @@ class BaseTrainer(ABC):
 
         return self.ema_decay
 
-    def ema(self, source_dict: dict) -> bool:
-        ema_decay = self.toEMADecay()
-
-        target_dict = self.ema_model.state_dict()
-        for key in source_dict.keys():
-            target_dict[key].data.copy_(
-                target_dict[key].data * ema_decay
-                + source_dict[key].data * (1 - ema_decay)
-            )
+    @torch.no_grad()
+    def updateEMA(self) -> bool:
+        """Update EMA directly on flat FSDP shards (CPU), no all-gather."""
+        beta = self.toEMADecay()
+        for p, p_ema in zip(self.model.parameters(), self._ema_params):
+            if not p.requires_grad:
+                continue
+            p_ema.mul_(beta).add_(p.data.detach().float().cpu(), alpha=1 - beta)
         return True
 
     def preProcessData(self, data_dict: dict, is_training: bool = True) -> Optional[Dict]:
@@ -409,13 +436,7 @@ class BaseTrainer(ABC):
             self.optim.step()
             self.sched.step()
 
-            full_sd = get_model_state_dict(
-                self.model,
-                options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-            )
-            if self.is_logger:
-                self.ema(full_sd)
-            del full_sd
+            self.updateEMA()
 
             self.optim.zero_grad(set_to_none=True)
 
@@ -554,14 +575,14 @@ class BaseTrainer(ABC):
         data_dict = moveTo(data_dict, self.device)
 
         result_dict = self.model(data_dict)
-
         result_dict = self.postProcessData(data_dict, result_dict, False)
-
         loss_dict = self.getLossDict(data_dict, result_dict)
 
-        ema_result_dict = self.ema_model(data_dict)
-
+        orig_shards = self._swap_to_ema()
+        ema_result_dict = self.model(data_dict)
         ema_loss_dict = self.getLossDict(data_dict, ema_result_dict)
+        self._swap_from_ema(orig_shards)
+        del orig_shards
 
         loss_item_dict = {}
 
@@ -676,23 +697,37 @@ class BaseTrainer(ABC):
         torch.cuda.empty_cache()
         return True
 
+    def _swap_to_ema(self) -> List[torch.Tensor]:
+        """Replace FSDP model shards with EMA weights; return original shards (CPU)."""
+        orig_shards: List[torch.Tensor] = []
+        for p, p_ema in zip(self.model.parameters(), self._ema_params):
+            orig_shards.append(p.data.detach().cpu().clone())
+            p.data.copy_(p_ema.to(device=p.device, dtype=p.dtype))
+        return orig_shards
+
+    def _swap_from_ema(self, orig_shards: List[torch.Tensor]) -> None:
+        """Restore original training shards from CPU backup."""
+        for p, orig in zip(self.model.parameters(), orig_shards):
+            p.data.copy_(orig.to(device=p.device, dtype=p.dtype))
+
     @torch.no_grad()
     def sampleEMAStep(self) -> bool:
         if not self.is_logger:
             return True
 
-        if self.quick_test:
-            self.sampleModelStep(self.ema_model, "EMA")
-            torch.cuda.empty_cache()
-            return True
+        if not self.quick_test:
+            if self.sample_results_freq <= 0:
+                return True
+            if self.epoch % self.sample_results_freq != 0:
+                return True
 
-        if self.sample_results_freq <= 0:
-            return True
+        orig_shards = self._swap_to_ema()
 
-        if self.epoch % self.sample_results_freq != 0:
-            return True
+        self.model.eval()
+        self.sampleModelStep(self.model, "EMA")
 
-        self.sampleModelStep(self.ema_model, "EMA")
+        self._swap_from_ema(orig_shards)
+        del orig_shards
         torch.cuda.empty_cache()
         return True
 
@@ -757,18 +792,39 @@ class BaseTrainer(ABC):
 
         return True
 
+    def _gather_ema_full_state_dict(self) -> dict:
+        """Temporarily swap EMA shards into the FSDP model, gather full
+        state dict, then restore the original training weights."""
+        orig_shards = [p.data.detach().clone() for p in self.model.parameters()]
+
+        for p, p_ema in zip(self.model.parameters(), self._ema_params):
+            p.data.copy_(p_ema.to(device=p.device, dtype=p.dtype))
+
+        ema_full_sd = get_model_state_dict(
+            self.model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
+
+        for p, orig in zip(self.model.parameters(), orig_shards):
+            p.data.copy_(orig)
+        del orig_shards
+
+        return ema_full_sd
+
     def saveModel(self, save_model_file_path: Union[str, None] = None) -> bool:
         full_model_sd = get_model_state_dict(
             self.model,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
 
+        ema_full_sd = self._gather_ema_full_state_dict()
+
         if self.is_logger and save_model_file_path is not None:
             createFileFolder(save_model_file_path)
 
             model_state_dict = {
                 "model": full_model_sd,
-                "ema_model": self.ema_model.state_dict(),
+                "ema_model": ema_full_sd,
                 "ema_loss": self.ema_loss,
                 "step": self.step,
                 "epoch": self.epoch,
