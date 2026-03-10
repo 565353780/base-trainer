@@ -16,6 +16,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
+    get_optimizer_state_dict,
+    set_optimizer_state_dict,
     StateDictOptions,
 )
 from torch.utils.data import DataLoader, DistributedSampler
@@ -211,6 +213,8 @@ class BaseTrainer(ABC):
         self.optim = AdamW(self.model.parameters(), lr=self.lr)
         self.sched = LambdaLR(self.optim, lr_lambda=self.warmup_lr)
 
+        self._restore_optim_sched()
+
         self.initRecords()
         return
 
@@ -283,6 +287,10 @@ class BaseTrainer(ABC):
             self._pending_ema_state_dict = model_state_dict["ema_model"]
 
         if not weights_only:
+            if "optimizer" in model_state_dict.keys():
+                self._pending_optim_state_dict = model_state_dict["optimizer"]
+            if "scheduler" in model_state_dict.keys():
+                self._pending_sched_state_dict = model_state_dict["scheduler"]
             if self.is_logger:
                 if "ema_loss" in model_state_dict.keys():
                     self.ema_loss = model_state_dict["ema_loss"]
@@ -334,6 +342,28 @@ class BaseTrainer(ABC):
             return 1.0
 
         return min(step, self.warm_step_num) / self.warm_step_num
+
+    def _restore_optim_sched(self) -> None:
+        """Restore optimizer and scheduler states from checkpoint if available."""
+        pending_optim = getattr(self, "_pending_optim_state_dict", None)
+        if pending_optim is not None:
+            set_optimizer_state_dict(
+                self.model,
+                self.optim,
+                optim_state_dict=pending_optim,
+                options=StateDictOptions(
+                    full_state_dict=True,
+                    broadcast_from_rank0=True,
+                ),
+            )
+            del self._pending_optim_state_dict
+            print("[INFO][BaseTrainer::_restore_optim_sched] optimizer state restored.")
+
+        pending_sched = getattr(self, "_pending_sched_state_dict", None)
+        if pending_sched is not None:
+            self.sched.load_state_dict(pending_sched)
+            del self._pending_sched_state_dict
+            print("[INFO][BaseTrainer::_restore_optim_sched] scheduler state restored.")
 
     def _init_ema_shards(self) -> None:
         """Snapshot every FSDP-sharded parameter to a CPU clone.
@@ -576,7 +606,7 @@ class BaseTrainer(ABC):
                     )
                 )
 
-            if self.is_logger and self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
+            if self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
                 self.autoSaveModel(f'{self.step:06d}')
 
             self.step += 1
@@ -826,8 +856,11 @@ class BaseTrainer(ABC):
 
     def _gather_ema_full_state_dict(self) -> dict:
         """Temporarily swap EMA shards into the FSDP model, gather full
-        state dict, then restore the original training weights."""
-        orig_shards = [p.data.detach().clone() for p in self.model.parameters()]
+        state dict, then restore the original training weights.
+
+        orig_shards are kept on CPU to avoid doubling GPU memory usage.
+        """
+        orig_shards = [p.data.detach().cpu().clone() for p in self.model.parameters()]
 
         for p, p_ema in zip(self.model.parameters(), self._ema_params):
             p.data.copy_(p_ema.to(device=p.device, dtype=p.dtype))
@@ -838,25 +871,35 @@ class BaseTrainer(ABC):
         )
 
         for p, orig in zip(self.model.parameters(), orig_shards):
-            p.data.copy_(orig)
+            p.data.copy_(orig.to(device=p.device, dtype=p.dtype))
         del orig_shards
 
         return ema_full_sd
 
     def saveModel(self, save_model_file_path: Union[str, None] = None) -> bool:
+        # All ranks must participate in get_model_state_dict (FSDP all-gather)
         full_model_sd = get_model_state_dict(
             self.model,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
 
+        optim_sd = get_optimizer_state_dict(
+            self.model,
+            self.optim,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
+
         ema_full_sd = self._gather_ema_full_state_dict()
 
+        # Only rank0 performs the actual file write
         if self.is_logger and save_model_file_path is not None:
             createFileFolder(save_model_file_path)
 
             model_state_dict = {
                 "model": full_model_sd,
                 "ema_model": ema_full_sd,
+                "optimizer": optim_sd,
+                "scheduler": self.sched.state_dict(),
                 "ema_loss": self.ema_loss,
                 "step": self.step,
                 "epoch": self.epoch,
@@ -864,6 +907,8 @@ class BaseTrainer(ABC):
             }
 
             torch.save(model_state_dict, save_model_file_path)
+
+        del full_model_sd, ema_full_sd, optim_sd
 
         dist.barrier()
         return True
