@@ -61,13 +61,19 @@ def setup_distributed(backend: Union[str, None] = None):
     return node_rank, local_rank, device
 
 def check_and_replace_nan_in_grad(model):
-    for name, param in model.named_parameters():
-        if param.grad is not None and torch.isnan(param.grad).any():
-            print(f"NaN detected in gradient: {name}")
-            param.grad = torch.where(
-                torch.isnan(param.grad), torch.zeros_like(param.grad), param.grad
-            )
-    return True
+    """Check for NaN/Inf gradients via total grad norm (O(1) allreduce per param).
+
+    Returns True if gradients are clean, False if NaN/Inf was detected and
+    all gradients have been zeroed out.
+    """
+    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+    if torch.isfinite(total_norm):
+        return True
+    print(f"[WARN] NaN/Inf detected in gradient (total_norm={total_norm}), zeroing all grads.")
+    for param in model.parameters():
+        if param.grad is not None:
+            param.grad.zero_()
+    return False
 
 
 class BaseTrainer(ABC):
