@@ -112,9 +112,14 @@ class BaseTrainer(ABC):
 
         self.warm_step_num = warm_step_num / accum_iter
         self.finetune_step_num = finetune_step_num
-        self.lr = (
-            lr * batch_size / lr_batch_size * self.accum_iter * dist.get_world_size()
-        )
+
+        if lr_batch_size > 0:
+            self.lr = (
+                lr * batch_size / lr_batch_size * self.accum_iter * dist.get_world_size()
+            )
+        else:
+            self.lr = lr
+
         self.ema_start_step = ema_start_step
         self.ema_decay_init = ema_decay_init
         self.ema_decay = ema_decay
@@ -541,6 +546,14 @@ class BaseTrainer(ABC):
             if self.is_logger:
                 for name in self.timer.time_sums:
                     self.logger.addScalar(f"Time/{name}", self.timer.lastTime(name), self.step)
+
+                # 获取当前已分配的显存 (GB)
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                # 获取缓存保留的显存 (GB)
+                reserved = torch.cuda.memory_reserved() / 1024**3
+
+                self.logger.addScalar('GPU/Allocated_GB', allocated, self.step)
+                self.logger.addScalar('GPU/Reserved_GB', reserved, self.step)
 
                 pbar.set_description(
                     "EPOCH %d LOSS %.6f LR %.4f"
