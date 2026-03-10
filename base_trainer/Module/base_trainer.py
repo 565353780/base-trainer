@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import numpy as np
 import torch.distributed as dist
@@ -303,6 +304,17 @@ class BaseTrainer(ABC):
             self.save_result_folder_path = "./output/" + current_time + "/"
         if self.save_log_folder_path == "auto":
             self.save_log_folder_path = "./logs/" + current_time + "/"
+
+        # 若路径中不包含 timestamp（格式见 Method/time.py），则追加 current_time + "/"
+        timestamp_pattern = r"\d{8}_\d{2}:\d{2}:\d{2}"
+        if self.save_result_folder_path is not None:
+            result_has_ts = self.save_result_folder_path and re.search(timestamp_pattern, self.save_result_folder_path)
+            if not result_has_ts:
+                self.save_result_folder_path = self.save_result_folder_path + current_time + "/"
+        if self.save_log_folder_path is not None:
+            log_has_ts = self.save_log_folder_path and re.search(timestamp_pattern, self.save_log_folder_path)
+            if not log_has_ts:
+                self.save_log_folder_path = self.save_log_folder_path + current_time + "/"
 
         if self.save_result_folder_path is not None:
             os.makedirs(self.save_result_folder_path, exist_ok=True)
