@@ -29,6 +29,7 @@ class Trainer(BaseTrainer):
         quick_test: bool = False,
         record_cuda_time: bool = False,
         save_checkpoint_freq: int = -1,
+        prefetch_factor: int = 4,
     ) -> None:
         # super params definition here
         # self.name = value
@@ -55,6 +56,7 @@ class Trainer(BaseTrainer):
             quick_test=quick_test,
             record_cuda_time=record_cuda_time,
             save_checkpoint_freq=save_checkpoint_freq,
+            prefetch_factor=prefetch_factor,
         )
         return
 
@@ -141,6 +143,7 @@ def demo():
     quick_test = False
     record_cuda_time = False
     save_checkpoint_freq = 1000
+    prefetch_factor = 4
 
     trainer = Trainer(
         batch_size=batch_size,
@@ -163,6 +166,7 @@ def demo():
         quick_test=quick_test,
         record_cuda_time=record_cuda_time,
         save_checkpoint_freq=save_checkpoint_freq,
+        prefetch_factor=prefetch_factor,
     )
 
     trainer.train()
