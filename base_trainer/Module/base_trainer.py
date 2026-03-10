@@ -29,6 +29,12 @@ from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 from base_trainer.Module.timer import Timer
 
+try:
+    from einops._torch_specific import allow_ops_in_compiled_graph
+    allow_ops_in_compiled_graph()
+except ImportError:
+    pass
+
 
 def setup_distributed(backend: Union[str, None] = None):
     """
@@ -101,6 +107,7 @@ class BaseTrainer(ABC):
         save_checkpoint_freq: int = -1,
         prefetch_factor: int = 4,
         fsdp_shard_fn: Union[Callable, None] = default_fsdp_shard_fn,
+        compile_fn: Union[Callable, None] = None,
         mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32),
@@ -141,6 +148,7 @@ class BaseTrainer(ABC):
         self.quick_test = quick_test
 
         self.fsdp_shard_fn = fsdp_shard_fn
+        self.compile_fn = compile_fn
         if mp_policy is None:
             if torch.cuda.is_bf16_supported():
                 mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
@@ -202,6 +210,9 @@ class BaseTrainer(ABC):
 
         if self.is_logger:
             self.ema_loss = None
+
+        if self.compile_fn is not None:
+            self.compile_fn(self.model)
 
         device_type = "cuda" if self.backend == "nccl" else "cpu"
         self.device_mesh = init_device_mesh(device_type, (dist.get_world_size(),))
