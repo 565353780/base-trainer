@@ -6,6 +6,14 @@ from torch.utils.data import Dataset
 from base_trainer.Module.base_trainer import BaseTrainer
 
 
+def demo_compile_fn(model) -> None:
+    dit = model.dit
+    for i, block in enumerate(dit.double_blocks):
+        dit.double_blocks[i] = torch.compile(block)
+    for i, block in enumerate(dit.single_blocks):
+        dit.single_blocks[i] = torch.compile(block)
+    return
+
 class Trainer(BaseTrainer):
     def __init__(
         self,
@@ -146,7 +154,7 @@ def demo():
     record_cuda_time = False
     save_checkpoint_freq = 1000
     prefetch_factor = 4
-    compile_fn=None
+    compile_fn=demo_compile_fn
 
     trainer = Trainer(
         batch_size=batch_size,
