@@ -9,9 +9,19 @@ from base_trainer.Module.base_trainer import BaseTrainer
 def demo_compile_fn(model) -> None:
     dit = model.dit
     for i, block in enumerate(dit.double_blocks):
-        dit.double_blocks[i] = torch.compile(block)
+        dit.double_blocks[i] = torch.compile(
+            block,
+            mode="max-autotune",
+            fullgraph=True,
+            dynamic=False,
+        )
     for i, block in enumerate(dit.single_blocks):
-        dit.single_blocks[i] = torch.compile(block)
+        dit.single_blocks[i] = torch.compile(
+            block,
+            mode="max-autotune",
+            fullgraph=True,
+            dynamic=False,
+        )
     return
 
 class Trainer(BaseTrainer):
