@@ -1,4 +1,3 @@
-import io
 import os
 import re
 import torch
@@ -30,11 +29,13 @@ from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 from base_trainer.Module.timer import Timer
 
+'''
 try:
     from einops._torch_specific import allow_ops_in_compiled_graph
     allow_ops_in_compiled_graph()
 except ImportError:
     pass
+'''
 
 
 def setup_distributed(backend: Union[str, None] = None):
@@ -125,6 +126,7 @@ class BaseTrainer(ABC):
         mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32),
+        save_model_fn: Optional[Callable]=None,
     ) -> None:
         self.backend = "nccl" if torch.cuda.is_available() else "gloo"
         self.node_rank, self.local_rank, self.device = setup_distributed(self.backend)
@@ -169,6 +171,7 @@ class BaseTrainer(ABC):
             else:
                 mp_policy = MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=torch.float32)
         self.mp_policy = mp_policy
+        self.save_model_fn = save_model_fn
 
         self.record_cuda_time = record_cuda_time
         self.save_checkpoint_freq = save_checkpoint_freq
@@ -939,13 +942,12 @@ class BaseTrainer(ABC):
     def saveModel(
         self,
         save_model_file_path: str,
-        saveFn: Optional[Callable]=None,
     ) -> bool:
         # Only rank0 performs the actual file write
         if self.is_logger and save_model_file_path is not None:
             model_state_dict = self.collectModelStateDict()
 
-            if saveFn is None:
+            if self.save_model_fn is None:
                 createFileFolder(save_model_file_path)
 
                 tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
@@ -955,7 +957,7 @@ class BaseTrainer(ABC):
                 removeFile(save_model_file_path)
                 renameFile(tmp_save_model_file_path, save_model_file_path)
             else:
-                if not saveFn(model_state_dict, save_model_file_path):
+                if not self.save_model_fn(model_state_dict, save_model_file_path):
                     print('[ERROR][BaseTrainer::saveModel]')
                     print('\t saveFn failed!')
 
@@ -967,7 +969,6 @@ class BaseTrainer(ABC):
         name: str,
         value: Union[float, None] = None,
         check_lower: bool = True,
-        saveFn: Optional[Callable]=None,
     ) -> bool:
         skip = False
 
@@ -994,6 +995,6 @@ class BaseTrainer(ABC):
                 self.save_result_folder_path + "model_" + name + ".pth"
             )
 
-            self.saveModel(save_model_file_path, saveFn)
+            self.saveModel(save_model_file_path)
 
         return not skip

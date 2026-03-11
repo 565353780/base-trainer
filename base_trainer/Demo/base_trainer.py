@@ -1,7 +1,7 @@
 import torch
 from torch import nn
-from typing import Union
 from torch.utils.data import Dataset
+from typing import Callable, Optional, Union
 
 from base_trainer.Module.base_trainer import BaseTrainer
 
@@ -38,7 +38,8 @@ class Trainer(BaseTrainer):
         record_cuda_time: bool = False,
         save_checkpoint_freq: int = -1,
         prefetch_factor: int = 4,
-        compile_fn=None,
+        compile_fn: Optional[Callable]=None,
+        save_model_fn: Optional[Callable]=None,
     ) -> None:
         # super params definition here
         # self.name = value
@@ -67,6 +68,7 @@ class Trainer(BaseTrainer):
             save_checkpoint_freq=save_checkpoint_freq,
             prefetch_factor=prefetch_factor,
             compile_fn=compile_fn,
+            save_model_fn=save_model_fn,
         )
         return
 
@@ -154,7 +156,8 @@ def demo():
     record_cuda_time = False
     save_checkpoint_freq = 1000
     prefetch_factor = 4
-    compile_fn=demo_compile_fn
+    compile_fn = demo_compile_fn
+    save_model_fn = None
 
     trainer = Trainer(
         batch_size=batch_size,
@@ -179,6 +182,7 @@ def demo():
         save_checkpoint_freq=save_checkpoint_freq,
         prefetch_factor=prefetch_factor,
         compile_fn=compile_fn,
+        save_model_fn=save_model_fn,
     )
 
     trainer.train()
