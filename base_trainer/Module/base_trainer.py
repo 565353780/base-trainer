@@ -650,9 +650,6 @@ class BaseTrainer(ABC):
 
             if self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
                 self.autoSaveModel(f'{self.step:06d}')
-                dist.destroy_process_group()
-                exit()
-                self.autoSaveModel("last")
 
             self.step += 1
 
@@ -891,7 +888,7 @@ class BaseTrainer(ABC):
                         print("\t trainEpoch failed!")
                         return False
 
-                self.autoSaveModel("last")
+                # self.autoSaveModel("last")
 
                 if not self.evalEpoch():
                     print("[ERROR][BaseTrainer::train]")
