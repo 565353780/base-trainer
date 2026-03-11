@@ -30,13 +30,13 @@ from base_trainer.Module.async_dataloader import AsyncDataLoader
 from base_trainer.Module.logger import Logger
 from base_trainer.Module.timer import Timer
 
-'''
 try:
     from einops._torch_specific import allow_ops_in_compiled_graph
     allow_ops_in_compiled_graph()
 except ImportError:
+    print('[WARN][BaseTrainer::import]')
+    print('\t allow_ops_in_compiled_graph failed!')
     pass
-'''
 
 
 def setup_distributed(backend: Optional[str] = None):
