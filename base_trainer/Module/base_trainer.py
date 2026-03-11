@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import torch
@@ -646,7 +647,6 @@ class BaseTrainer(ABC):
 
             if self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
                 self.autoSaveModel(f'{self.step:06d}')
-                self.autoSaveModel('last')
 
             self.step += 1
 
@@ -916,7 +916,7 @@ class BaseTrainer(ABC):
 
         return ema_full_sd
 
-    def saveModel(self, save_model_file_path: Union[str, None] = None) -> bool:
+    def collectModelStateDict(self) -> Dict:
         # All ranks must participate in get_model_state_dict (FSDP all-gather)
         full_model_sd = get_model_state_dict(
             self.model,
@@ -925,28 +925,49 @@ class BaseTrainer(ABC):
 
         ema_full_sd = self._gather_ema_full_state_dict()
 
+        model_state_dict = {
+            "model": full_model_sd,
+            "ema_model": ema_full_sd,
+            "ema_loss": self.ema_loss,
+            "step": self.step,
+            "epoch": self.epoch,
+            "loss_min": self.loss_min,
+        }
+
+        return model_state_dict
+
+    def saveModel(
+        self,
+        save_model_file_path: str,
+        saveFn: Optional[Callable]=None,
+    ) -> bool:
         # Only rank0 performs the actual file write
         if self.is_logger and save_model_file_path is not None:
-            createFileFolder(save_model_file_path)
+            model_state_dict = self.collectModelStateDict()
 
-            model_state_dict = {
-                "model": full_model_sd,
-                "ema_model": ema_full_sd,
-                "ema_loss": self.ema_loss,
-                "step": self.step,
-                "epoch": self.epoch,
-                "loss_min": self.loss_min,
-            }
+            if saveFn is None:
+                createFileFolder(save_model_file_path)
 
-            torch.save(model_state_dict, save_model_file_path)
+                tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
 
-        del full_model_sd, ema_full_sd
+                torch.save(model_state_dict, tmp_save_model_file_path)
+
+                removeFile(save_model_file_path)
+                renameFile(tmp_save_model_file_path, save_model_file_path)
+            else:
+                if not saveFn(model_state_dict, save_model_file_path):
+                    print('[ERROR][BaseTrainer::saveModel]')
+                    print('\t saveFn failed!')
 
         dist.barrier()
         return True
 
     def autoSaveModel(
-        self, name: str, value: Union[float, None] = None, check_lower: bool = True
+        self,
+        name: str,
+        value: Union[float, None] = None,
+        check_lower: bool = True,
+        saveFn: Optional[Callable]=None,
     ) -> bool:
         skip = False
 
@@ -968,17 +989,11 @@ class BaseTrainer(ABC):
                 self.loss_min = value
 
         save_model_file_path = None
-        tmp_save_model_file_path = None
         if not skip:
             save_model_file_path = (
                 self.save_result_folder_path + "model_" + name + ".pth"
             )
-            tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
 
-        self.saveModel(tmp_save_model_file_path)
-
-        if not skip:
-            removeFile(save_model_file_path)
-            renameFile(tmp_save_model_file_path, save_model_file_path)
+            self.saveModel(save_model_file_path, saveFn)
 
         return not skip
