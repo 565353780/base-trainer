@@ -303,19 +303,10 @@ class BaseTrainer(ABC):
             except Exception as e:
                 print("[WARN][BaseTrainer::loadModel]")
                 print(
-                    "\t model state dict not fully match current model! will load matched data only!"
+                    "\t model state dict not fully match current model! will train from scratch!"
                 )
                 print("\t  Exception:")
                 print("\t", e)
-                set_model_state_dict(
-                    self.model,
-                    model_state_dict=model_sd,
-                    options=StateDictOptions(
-                        full_state_dict=True,
-                        broadcast_from_rank0=True,
-                        strict=False,
-                    ),
-                )
 
         metadata = [None, None, None, None]
         if is_rank0:
@@ -327,9 +318,6 @@ class BaseTrainer(ABC):
                     self.epoch = model_state_dict["epoch"]
                     metadata[1] = self.epoch
 
-            if "ema_model" in model_state_dict.keys():
-                self._pending_ema_state_dict = model_state_dict["ema_model"]
-
             if not weights_only:
                 if self.is_logger:
                     if "ema_loss" in model_state_dict.keys():
@@ -338,6 +326,11 @@ class BaseTrainer(ABC):
                 if "loss_min" in model_state_dict.keys():
                     self.loss_min = model_state_dict["loss_min"]
                     metadata[3] = self.loss_min
+
+        if self.is_logger:
+            if "ema_model" in model_state_dict.keys():
+                self._pending_ema_state_dict = model_state_dict["ema_model"]
+                self._has_pending_ema = True
 
         if dist.is_initialized():
             dist.broadcast_object_list(metadata, src=0)
@@ -407,9 +400,17 @@ class BaseTrainer(ABC):
         load it into the FSDP model to obtain the correct shard layout, copy
         the shards out, then restore the original training weights.
         """
-        pending_sd = getattr(self, "_pending_ema_state_dict", None)
+        has_pending = getattr(self, "_has_pending_ema", False)
+        if dist.is_initialized():
+            flag_list = [has_pending]
+            dist.broadcast_object_list(flag_list, src=0)
+            has_pending = flag_list[0]
 
-        if pending_sd is not None:
+        if has_pending:
+            pending_sd = getattr(self, "_pending_ema_state_dict", None)
+            if pending_sd is None:
+                pending_sd = {}
+
             orig_shards = [p.data.detach().clone() for p in self.model.parameters()]
 
             set_model_state_dict(
@@ -430,7 +431,9 @@ class BaseTrainer(ABC):
                 p.data.copy_(orig)
             del orig_shards
 
-            del self._pending_ema_state_dict
+            if hasattr(self, "_pending_ema_state_dict"):
+                del self._pending_ema_state_dict
+            self._has_pending_ema = False
         else:
             self._ema_params: List[torch.Tensor] = []
             for p in self.model.parameters():
