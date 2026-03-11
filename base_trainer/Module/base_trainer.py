@@ -1,6 +1,7 @@
 import os
 import re
 import torch
+import threading
 import numpy as np
 import torch.distributed as dist
 
@@ -8,7 +9,7 @@ from torch import nn
 from tqdm import tqdm
 from functools import partial
 from abc import ABC, abstractmethod
-from typing import Union, Callable, Optional, Dict, List
+from typing import Callable, Optional, Dict, List
 from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
@@ -38,7 +39,7 @@ except ImportError:
 '''
 
 
-def setup_distributed(backend: Union[str, None] = None):
+def setup_distributed(backend: Optional[str] = None):
     """
     初始化分布式环境，自动兼容 CPU / GPU 训练。
     返回: (node_rank, local_rank, device)
@@ -103,7 +104,7 @@ class BaseTrainer(ABC):
         batch_size: int = 32,
         accum_iter: int = 1,
         num_workers: int = 16,
-        model_file_path: Union[str, None] = None,
+        model_file_path: Optional[str] = None,
         weights_only: bool = False,
         warm_step_num: int = 2000,
         finetune_step_num: int = -1,
@@ -112,18 +113,18 @@ class BaseTrainer(ABC):
         ema_start_step: int = 5000,
         ema_decay_init: float = 0.99,
         ema_decay: float = 0.999,
-        save_result_folder_path: Union[str, None] = None,
-        save_log_folder_path: Union[str, None] = None,
-        best_model_metric_name: Union[str, None] = None,
+        save_result_folder_path: Optional[str] = None,
+        save_log_folder_path: Optional[str] = None,
+        best_model_metric_name: Optional[str] = None,
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
         record_cuda_time: bool = False,
         save_checkpoint_freq: int = -1,
         prefetch_factor: int = 4,
-        fsdp_shard_fn: Union[Callable, None] = default_fsdp_shard_fn,
-        compile_fn: Union[Callable, None] = None,
-        mp_policy: Union[MixedPrecisionPolicy, None] = MixedPrecisionPolicy(
+        fsdp_shard_fn: Optional[Callable] = default_fsdp_shard_fn,
+        compile_fn: Optional[Callable] = None,
+        mp_policy: Optional[MixedPrecisionPolicy] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32),
         save_model_fn: Optional[Callable]=None,
@@ -225,8 +226,7 @@ class BaseTrainer(ABC):
             print("\t createModel failed!")
             exit()
 
-        if self.is_logger:
-            self.ema_loss = None
+        self.ema_loss = None
 
         if self.compile_fn is not None:
             self.compile_fn(self.model)
@@ -650,6 +650,9 @@ class BaseTrainer(ABC):
 
             if self.save_checkpoint_freq > 0 and self.step % self.save_checkpoint_freq == 0:
                 self.autoSaveModel(f'{self.step:06d}')
+                dist.destroy_process_group()
+                exit()
+                self.autoSaveModel("last")
 
             self.step += 1
 
@@ -710,66 +713,76 @@ class BaseTrainer(ABC):
 
     @torch.no_grad()
     def evalEpoch(self) -> bool:
-        if not self.is_logger:
-            return True
-
         if "eval" not in self.dataloader_dict.keys():
             return True
 
-        dataloader = self.dataloader_dict["eval"]["dataloader"]
+        best_metric_value = None
 
-        async_dataloader = AsyncDataLoader(
-            dataloader,
-            partial(self.preProcessData, is_training=False),
-            max_workers=self.num_workers,
-            prefetch_depth=self.prefetch_factor,
-        )
+        if self.is_logger:
+            dataloader = self.dataloader_dict["eval"]["dataloader"]
 
-        avg_loss_dict = {}
-
-        print("[INFO][BaseTrainer::evalEpoch]")
-        print("\t start evaluating ...")
-        pbar = tqdm(total=len(dataloader))
-        for data_dict in async_dataloader:
-            if data_dict is not None:
-                data_dict = moveTo(data_dict, self.device)
-                data_dict = self.preProcessDataWithGPU(data_dict, is_training=False)
-
-            if data_dict is None:
-                pbar.update(1)
-                continue
-
-            eval_loss_dict = self.evalStep(data_dict)
-
-            for key, item in eval_loss_dict.items():
-                if key not in avg_loss_dict.keys():
-                    avg_loss_dict[key] = [item]
-                else:
-                    avg_loss_dict[key].append(item)
-
-            pbar.set_description(
-                "EPOCH %d LOSS %.6f LR %.4f"
-                % (
-                    self.epoch,
-                    eval_loss_dict["Loss"],
-                    self.getLr() / self.lr,
-                )
+            async_dataloader = AsyncDataLoader(
+                dataloader,
+                partial(self.preProcessData, is_training=False),
+                max_workers=self.num_workers,
+                prefetch_depth=self.prefetch_factor,
             )
 
-            pbar.update(1)
+            avg_loss_dict = {}
 
-            if self.quick_test:
-                break
+            print("[INFO][BaseTrainer::evalEpoch]")
+            print("\t start evaluating ...")
+            pbar = tqdm(total=len(dataloader))
+            for data_dict in async_dataloader:
+                if data_dict is not None:
+                    data_dict = moveTo(data_dict, self.device)
+                    data_dict = self.preProcessDataWithGPU(data_dict, is_training=False)
 
-        pbar.close()
+                if data_dict is None:
+                    pbar.update(1)
+                    continue
 
-        for key, item in avg_loss_dict.items():
-            avg_item = np.mean(item)
-            self.logger.addScalar("Eval/" + key, avg_item, self.step)
+                eval_loss_dict = self.evalStep(data_dict)
 
-            if self.best_model_metric_name is not None:
-                if key == self.best_model_metric_name:
-                    self.autoSaveModel("best", avg_item, self.is_metric_lower_better)
+                for key, item in eval_loss_dict.items():
+                    if key not in avg_loss_dict.keys():
+                        avg_loss_dict[key] = [item]
+                    else:
+                        avg_loss_dict[key].append(item)
+
+                pbar.set_description(
+                    "EPOCH %d LOSS %.6f LR %.4f"
+                    % (
+                        self.epoch,
+                        eval_loss_dict["Loss"],
+                        self.getLr() / self.lr,
+                    )
+                )
+
+                pbar.update(1)
+
+                if self.quick_test:
+                    break
+
+            pbar.close()
+
+            for key, item in avg_loss_dict.items():
+                avg_item = np.mean(item)
+                self.logger.addScalar("Eval/" + key, avg_item, self.step)
+
+                if self.best_model_metric_name is not None:
+                    if key == self.best_model_metric_name:
+                        best_metric_value = float(avg_item)
+
+        # Broadcast best metric from logger to all ranks so all can participate in autoSaveModel
+        if self.best_model_metric_name is not None:
+            metric_list = [best_metric_value]
+            if dist.is_initialized():
+                dist.broadcast_object_list(metric_list, src=0)
+            best_metric_value = metric_list[0]
+
+            if best_metric_value is not None:
+                self.autoSaveModel("best", best_metric_value, self.is_metric_lower_better)
 
         return True
 
@@ -895,6 +908,9 @@ class BaseTrainer(ABC):
                     print("\t sampleEMAStep failed!")
                     return False
 
+                # Sync all ranks after logger-only operations (eval, sample)
+                dist.barrier()
+
         return True
 
     def _gather_ema_full_state_dict(self) -> dict:
@@ -943,23 +959,25 @@ class BaseTrainer(ABC):
         self,
         save_model_file_path: str,
     ) -> bool:
-        # Only rank0 performs the actual file write
+        # All ranks must participate in collectModelStateDict for FSDP all-gather
+        model_state_dict = self.collectModelStateDict()
+
         if self.is_logger and save_model_file_path is not None:
-            model_state_dict = self.collectModelStateDict()
+            createFileFolder(save_model_file_path)
 
-            if self.save_model_fn is None:
-                createFileFolder(save_model_file_path)
+            tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
 
-                tmp_save_model_file_path = save_model_file_path[:-4] + "_tmp.pth"
+            torch.save(model_state_dict, tmp_save_model_file_path)
 
-                torch.save(model_state_dict, tmp_save_model_file_path)
+            removeFile(save_model_file_path)
+            renameFile(tmp_save_model_file_path, save_model_file_path)
 
-                removeFile(save_model_file_path)
-                renameFile(tmp_save_model_file_path, save_model_file_path)
-            else:
-                if not self.save_model_fn(model_state_dict, save_model_file_path):
-                    print('[ERROR][BaseTrainer::saveModel]')
-                    print('\t saveFn failed!')
+            if self.save_model_fn is not None:
+                threading.Thread(
+                    target=self.save_model_fn,
+                    args=(save_model_file_path,),
+                    daemon=True,
+                ).start()
 
         dist.barrier()
         return True
@@ -967,7 +985,7 @@ class BaseTrainer(ABC):
     def autoSaveModel(
         self,
         name: str,
-        value: Union[float, None] = None,
+        value: Optional[float] = None,
         check_lower: bool = True,
     ) -> bool:
         skip = False
@@ -995,6 +1013,7 @@ class BaseTrainer(ABC):
                 self.save_result_folder_path + "model_" + name + ".pth"
             )
 
-            self.saveModel(save_model_file_path)
+        # All ranks must call saveModel for FSDP collective communication
+        self.saveModel(save_model_file_path)
 
         return not skip
