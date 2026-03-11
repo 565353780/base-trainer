@@ -67,19 +67,32 @@ def setup_distributed(backend: Union[str, None] = None):
     return node_rank, local_rank, device
 
 def check_and_replace_nan_in_grad(model):
-    """Check for NaN/Inf gradients via total grad norm (O(1) allreduce per param).
+    """Check for NaN/Inf gradients and ensure ALL ranks agree on the result.
 
-    Returns True if gradients are clean, False if NaN/Inf was detected and
-    all gradients have been zeroed out.
+    Each rank computes a local flag from its own FSDP shard gradients, then
+    an all-reduce ensures every rank takes the same branch (skip or update).
+    Without this synchronization, some ranks may skip optim.step while others
+    proceed, causing FSDP weight divergence and eventual NCCL timeout.
+
+    Returns True if gradients are clean on ALL ranks, False otherwise.
     """
-    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
-    if torch.isfinite(total_norm):
-        return True
-    print(f"[WARN] NaN/Inf detected in gradient (total_norm={total_norm}), zeroing all grads.")
+    has_nan = torch.zeros(1, device=next(model.parameters()).device)
     for param in model.parameters():
         if param.grad is not None:
-            param.grad.zero_()
-    return False
+            if not torch.isfinite(param.grad).all():
+                has_nan.fill_(1.0)
+                break
+
+    if dist.is_initialized():
+        dist.all_reduce(has_nan, op=dist.ReduceOp.MAX)
+
+    if has_nan.item() > 0:
+        print(f"[WARN] NaN/Inf detected in gradient (rank {dist.get_rank() if dist.is_initialized() else 0}), zeroing all grads.")
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad.zero_()
+        return False
+    return True
 
 
 class BaseTrainer(ABC):
