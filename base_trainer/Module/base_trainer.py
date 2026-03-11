@@ -277,14 +277,24 @@ class BaseTrainer(ABC):
             print("\t model_file_path:", model_file_path)
             return False
 
-        model_state_dict = torch.load(
-            model_file_path, map_location="cpu", weights_only=False
-        )
-        if "model" in model_state_dict.keys():
+        is_rank0 = not dist.is_initialized() or dist.get_rank() == 0
+        if is_rank0:
+            model_state_dict = torch.load(
+                model_file_path, map_location="cpu", weights_only=False
+            )
+        else:
+            model_state_dict = {}
+
+        if is_rank0 and "model" in model_state_dict.keys():
+            model_sd = model_state_dict["model"]
+        else:
+            model_sd = {}
+
+        if is_rank0 and "model" in model_state_dict.keys() or not is_rank0:
             try:
                 set_model_state_dict(
                     self.model,
-                    model_state_dict=model_state_dict["model"],
+                    model_state_dict=model_sd,
                     options=StateDictOptions(
                         full_state_dict=True,
                         broadcast_from_rank0=True,
@@ -299,7 +309,7 @@ class BaseTrainer(ABC):
                 print("\t", e)
                 set_model_state_dict(
                     self.model,
-                    model_state_dict=model_state_dict["model"],
+                    model_state_dict=model_sd,
                     options=StateDictOptions(
                         full_state_dict=True,
                         broadcast_from_rank0=True,
@@ -307,21 +317,39 @@ class BaseTrainer(ABC):
                     ),
                 )
 
-        if not weights_only:
-            if "step" in model_state_dict.keys():
-                self.step = model_state_dict["step"]
-            if "epoch" in model_state_dict.keys():
-                self.epoch = model_state_dict["epoch"]
+        metadata = [None, None, None, None]
+        if is_rank0:
+            if not weights_only:
+                if "step" in model_state_dict.keys():
+                    self.step = model_state_dict["step"]
+                    metadata[0] = self.step
+                if "epoch" in model_state_dict.keys():
+                    self.epoch = model_state_dict["epoch"]
+                    metadata[1] = self.epoch
 
-        if "ema_model" in model_state_dict.keys():
-            self._pending_ema_state_dict = model_state_dict["ema_model"]
+            if "ema_model" in model_state_dict.keys():
+                self._pending_ema_state_dict = model_state_dict["ema_model"]
 
-        if not weights_only:
-            if self.is_logger:
-                if "ema_loss" in model_state_dict.keys():
-                    self.ema_loss = model_state_dict["ema_loss"]
-            if "loss_min" in model_state_dict.keys():
-                self.loss_min = model_state_dict["loss_min"]
+            if not weights_only:
+                if self.is_logger:
+                    if "ema_loss" in model_state_dict.keys():
+                        self.ema_loss = model_state_dict["ema_loss"]
+                        metadata[2] = self.ema_loss
+                if "loss_min" in model_state_dict.keys():
+                    self.loss_min = model_state_dict["loss_min"]
+                    metadata[3] = self.loss_min
+
+        if dist.is_initialized():
+            dist.broadcast_object_list(metadata, src=0)
+            if not is_rank0:
+                if metadata[0] is not None:
+                    self.step = metadata[0]
+                if metadata[1] is not None:
+                    self.epoch = metadata[1]
+                if metadata[2] is not None and self.is_logger:
+                    self.ema_loss = metadata[2]
+                if metadata[3] is not None:
+                    self.loss_min = metadata[3]
 
         print("[INFO][BaseTrainer::loadModel]")
         print("\t model loaded from:", model_file_path)
