@@ -278,7 +278,7 @@ class BaseTrainer(ABC):
         pass
 
     def loadModel(self, model_file_path: str, weights_only: bool = False) -> bool:
-        if self.load_model_fn is not None:
+        if self.is_logger and self.load_model_fn is not None:
             self.load_model_fn(model_file_path)
 
         if not os.path.exists(model_file_path):
@@ -352,7 +352,7 @@ class BaseTrainer(ABC):
         print("[INFO][BaseTrainer::loadModel]")
         print("\t model loaded from:", model_file_path)
 
-        if self.load_model_fn is not None:
+        if self.is_logger and self.load_model_fn is not None:
             removeFile(model_file_path)
         return True
 
