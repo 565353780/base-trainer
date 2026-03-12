@@ -178,8 +178,8 @@ class BaseTrainer(ABC):
         self.save_checkpoint_freq = save_checkpoint_freq
         self.prefetch_factor = prefetch_factor
 
-        self.step = 1
-        self.epoch = 1
+        self.step = 0
+        self.epoch = 0
         self.loss_dict_list = []
 
         self.loss_min = float("inf")
@@ -217,6 +217,7 @@ class BaseTrainer(ABC):
                 num_workers=num_workers,
                 prefetch_factor=prefetch_factor if num_workers > 0 else None,
                 pin_memory=True,
+                drop_last=True,
                 collate_fn=collate_fn,
             )
 
@@ -312,24 +313,21 @@ class BaseTrainer(ABC):
                 print("\t  Exception:")
                 print("\t", e)
 
-        metadata = [None, None, None, None]
+        metadata = [None, None, None]
         if is_rank0:
             if not weights_only:
                 if "step" in model_state_dict.keys():
                     self.step = model_state_dict["step"]
                     metadata[0] = self.step
-                if "epoch" in model_state_dict.keys():
-                    self.epoch = model_state_dict["epoch"]
-                    metadata[1] = self.epoch
 
             if not weights_only:
                 if self.is_logger:
                     if "ema_loss" in model_state_dict.keys():
                         self.ema_loss = model_state_dict["ema_loss"]
-                        metadata[2] = self.ema_loss
+                        metadata[1] = self.ema_loss
                 if "loss_min" in model_state_dict.keys():
                     self.loss_min = model_state_dict["loss_min"]
-                    metadata[3] = self.loss_min
+                    metadata[2] = self.loss_min
 
         if self.is_logger:
             if "ema_model" in model_state_dict.keys():
@@ -341,12 +339,10 @@ class BaseTrainer(ABC):
             if not is_rank0:
                 if metadata[0] is not None:
                     self.step = metadata[0]
-                if metadata[1] is not None:
-                    self.epoch = metadata[1]
-                if metadata[2] is not None and self.is_logger:
-                    self.ema_loss = metadata[2]
-                if metadata[3] is not None:
-                    self.loss_min = metadata[3]
+                if metadata[1] is not None and self.is_logger:
+                    self.ema_loss = metadata[1]
+                if metadata[2] is not None:
+                    self.loss_min = metadata[2]
 
         print("[INFO][BaseTrainer::loadModel]")
         print("\t model loaded from:", model_file_path)
@@ -489,7 +485,14 @@ class BaseTrainer(ABC):
 
     def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
+
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.start('moveTo')
         data_dict = moveTo(data_dict, self.device)
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.pause('moveTo')
 
         is_accumulating = self.step % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
@@ -502,8 +505,14 @@ class BaseTrainer(ABC):
             torch.cuda.synchronize()
             self.timer.pause('forward')
 
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.start('loss_compute')
         result_dict = self.postProcessData(data_dict, result_dict, True)
         loss_dict = self.getLossDict(data_dict, result_dict)
+        if self.is_logger and self.record_cuda_time:
+            torch.cuda.synchronize()
+            self.timer.pause('loss_compute')
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
@@ -525,9 +534,15 @@ class BaseTrainer(ABC):
             return {}
 
         if not is_accumulating:
+            if self.is_logger and self.record_cuda_time:
+                torch.cuda.synchronize()
+                self.timer.start('optim_step')
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optim.step()
             self.sched.step()
+            if self.is_logger and self.record_cuda_time:
+                torch.cuda.synchronize()
+                self.timer.pause('optim_step')
 
             self.updateEMA()
 
@@ -566,14 +581,23 @@ class BaseTrainer(ABC):
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
         while not data_prefetcher.exhausted:
+            if self.is_logger and self.record_cuda_time:
+                torch.cuda.synchronize()
+                self.timer.start('data_prefetch')
             try:
                 data_dict = data_prefetcher.next()
             except:
+                if self.is_logger and self.record_cuda_time:
+                    torch.cuda.synchronize()
+                    self.timer.pause('data_prefetch')
                 print("[WARN][BaseTrainer::trainEpoch]")
                 print(
                     "\t call next for DataPrefetcher failed! will early stop this training epoch!"
                 )
                 break
+            if self.is_logger and self.record_cuda_time:
+                torch.cuda.synchronize()
+                self.timer.pause('data_prefetch')
 
             if data_dict is None:
                 if self.is_logger:
@@ -857,6 +881,9 @@ class BaseTrainer(ABC):
         return result_dict
 
     def train(self) -> bool:
+        self.step += 1
+        self.epoch += 1
+
         final_step = self.step + self.finetune_step_num
 
         if self.is_logger:
