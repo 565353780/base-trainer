@@ -127,6 +127,7 @@ class BaseTrainer(ABC):
         mp_policy: Optional[MixedPrecisionPolicy] = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32),
+        load_model_fn: Optional[Callable]=None,
         save_model_fn: Optional[Callable]=None,
     ) -> None:
         self.backend = "nccl" if torch.cuda.is_available() else "gloo"
@@ -172,6 +173,7 @@ class BaseTrainer(ABC):
             else:
                 mp_policy = MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=torch.float32)
         self.mp_policy = mp_policy
+        self.load_model_fn = load_model_fn
         self.save_model_fn = save_model_fn
 
         self.record_cuda_time = record_cuda_time
@@ -276,6 +278,9 @@ class BaseTrainer(ABC):
         pass
 
     def loadModel(self, model_file_path: str, weights_only: bool = False) -> bool:
+        if self.load_model_fn is not None:
+            self.load_model_fn(model_file_path)
+
         if not os.path.exists(model_file_path):
             print("[ERROR][BaseTrainer::loadModel]")
             print("\t model file not exist!")
@@ -347,6 +352,8 @@ class BaseTrainer(ABC):
         print("[INFO][BaseTrainer::loadModel]")
         print("\t model loaded from:", model_file_path)
 
+        if self.load_model_fn is not None:
+            removeFile(model_file_path)
         return True
 
     def initRecords(self) -> bool:

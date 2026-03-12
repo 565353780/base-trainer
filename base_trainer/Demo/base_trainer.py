@@ -49,6 +49,7 @@ class Trainer(BaseTrainer):
         save_checkpoint_freq: int = -1,
         prefetch_factor: int = 4,
         compile_fn: Optional[Callable]=None,
+        load_model_fn: Optional[Callable]=None,
         save_model_fn: Optional[Callable]=None,
     ) -> None:
         # super params definition here
@@ -78,6 +79,7 @@ class Trainer(BaseTrainer):
             save_checkpoint_freq=save_checkpoint_freq,
             prefetch_factor=prefetch_factor,
             compile_fn=compile_fn,
+            load_model_fn=load_model_fn,
             save_model_fn=save_model_fn,
         )
         return
