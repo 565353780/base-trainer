@@ -633,8 +633,6 @@ class BaseTrainer(ABC):
             if self.is_logger:
                 self.timer.start('step')
 
-            if self.is_logger:
-                self.timer.start('data_prefetch')
             try:
                 data_dict = data_prefetcher.next()
             except:
@@ -643,8 +641,6 @@ class BaseTrainer(ABC):
                     "\t call next for DataPrefetcher failed! will early stop this training epoch!"
                 )
                 break
-            if self.is_logger:
-                self.timer.pause('data_prefetch')
 
             if data_dict is None:
                 if self.is_logger:
