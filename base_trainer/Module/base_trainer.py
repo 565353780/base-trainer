@@ -4,6 +4,7 @@ import torch
 import threading
 import numpy as np
 import torch.distributed as dist
+from time import time as _wall_time
 
 from torch import nn
 from tqdm import tqdm
@@ -98,6 +99,29 @@ def check_and_replace_nan_in_grad(model):
     return True
 
 
+def _check_and_abort(success: bool, msg: str = "") -> None:
+    """Collective check: if ANY rank reports failure, ALL ranks abort.
+
+    Uses all_reduce(MIN) so that if any rank sets success=False the
+    reduced value is 0 on every rank. All ranks then tear down the
+    process group and exit together — no NCCL hang.
+    """
+    if dist.is_initialized():
+        flag = torch.tensor([1 if success else 0], dtype=torch.int32)
+        if torch.cuda.is_available():
+            flag = flag.to(torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}"))
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+        success = flag.item() > 0
+
+    if not success:
+        if msg:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            print(f"[ABORT][rank {rank}] {msg}")
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        exit(1)
+
+
 class BaseTrainer(ABC):
     def __init__(
         self,
@@ -119,7 +143,6 @@ class BaseTrainer(ABC):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
-        record_cuda_time: bool = False,
         save_checkpoint_freq: int = -1,
         prefetch_factor: int = 4,
         fsdp_shard_fn: Optional[Callable] = default_fsdp_shard_fn,
@@ -176,7 +199,6 @@ class BaseTrainer(ABC):
         self.load_model_fn = load_model_fn
         self.save_model_fn = save_model_fn
 
-        self.record_cuda_time = record_cuda_time
         self.save_checkpoint_freq = save_checkpoint_freq
         self.prefetch_factor = prefetch_factor
 
@@ -193,10 +215,11 @@ class BaseTrainer(ABC):
             self.logger = Logger()
 
         self.dataloader_dict = {}
-        if not self.createDatasets():
+        dataset_ok = self.createDatasets()
+        if not dataset_ok:
             print("[ERROR][BaseTrainer::__init__]")
             print("\t createDatasets failed!")
-            exit()
+        _check_and_abort(dataset_ok, "createDatasets failed")
 
         for key, item in self.dataloader_dict.items():
             collate_fn = item.get("collate_fn", None)
@@ -226,11 +249,11 @@ class BaseTrainer(ABC):
             )
 
         self.model: nn.Module
-        if not self.createModel():
-            if self.is_logger:
-                print("[ERROR][BaseTrainer::__init__]")
-                print("\t createModel failed!")
-            exit()
+        model_ok = self.createModel()
+        if not model_ok and self.is_logger:
+            print("[ERROR][BaseTrainer::__init__]")
+            print("\t createModel failed!")
+        _check_and_abort(model_ok, "createModel failed")
 
         self.ema_loss = None
 
@@ -262,11 +285,11 @@ class BaseTrainer(ABC):
         fully_shard(self.model, mesh=self.device_mesh, mp_policy=self.mp_policy)
 
         if model_file_path is not None:
-            if not self.loadModel(model_file_path, weights_only):
-                if self.is_logger:
-                    print("[ERROR][BaseTrainer::__init__]")
-                    print("\t loadModel failed!")
-                exit()
+            load_ok = self.loadModel(model_file_path, weights_only)
+            if not load_ok and self.is_logger:
+                print("[ERROR][BaseTrainer::__init__]")
+                print("\t loadModel failed!")
+            _check_and_abort(load_ok, "loadModel failed")
 
         self._init_ema_shards()
 
@@ -532,22 +555,18 @@ class BaseTrainer(ABC):
         is_accumulating = self.step % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
 
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.start('forward')
+        if self.is_logger:
+            self.timer.startCuda('forward')
         result_dict = self.model(data_dict)
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.pause('forward')
+        if self.is_logger:
+            self.timer.pauseCuda('forward')
 
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.start('loss_compute')
+        if self.is_logger:
+            self.timer.startCuda('loss_compute')
         result_dict = self.postProcessData(data_dict, result_dict, True)
         loss_dict = self.getLossDict(data_dict, result_dict)
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.pause('loss_compute')
+        if self.is_logger:
+            self.timer.pauseCuda('loss_compute')
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
@@ -555,13 +574,11 @@ class BaseTrainer(ABC):
         loss = loss_dict["Loss"]
         accum_loss = loss / self.accum_iter
 
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.start('backward')
+        if self.is_logger:
+            self.timer.startCuda('backward')
         accum_loss.backward()
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.pause('backward')
+        if self.is_logger:
+            self.timer.pauseCuda('backward')
 
         if not check_and_replace_nan_in_grad(self.model):
             print(f"[WARN] step {self.step}: grad NaN detected, skipping update.")
@@ -612,24 +629,20 @@ class BaseTrainer(ABC):
 
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
+        _step_t0 = _wall_time()
         while not data_prefetcher.exhausted:
-            if self.is_logger and self.record_cuda_time:
-                torch.cuda.synchronize()
-                self.timer.start('data_prefetch')
+            if self.is_logger:
+                _prefetch_t0 = _wall_time()
             try:
                 data_dict = data_prefetcher.next()
             except:
-                if self.is_logger and self.record_cuda_time:
-                    torch.cuda.synchronize()
-                    self.timer.pause('data_prefetch')
                 print("[WARN][BaseTrainer::trainEpoch]")
                 print(
                     "\t call next for DataPrefetcher failed! will early stop this training epoch!"
                 )
                 break
-            if self.is_logger and self.record_cuda_time:
-                torch.cuda.synchronize()
-                self.timer.pause('data_prefetch')
+            if self.is_logger:
+                self.timer.addTime('data_prefetch', _wall_time() - _prefetch_t0)
 
             if data_dict is None:
                 if self.is_logger:
@@ -642,6 +655,12 @@ class BaseTrainer(ABC):
                         self.timer.addTime(key[5:], value.mean().item())
 
             train_loss_dict = self.trainStep(data_dict)
+
+            if self.is_logger:
+                torch.cuda.synchronize()
+                self.timer.collectCudaTimes()
+                self.timer.addTime('step_wall', _wall_time() - _step_t0)
+                _step_t0 = _wall_time()
 
             self.loss_dict_list.append(train_loss_dict)
 
@@ -672,9 +691,7 @@ class BaseTrainer(ABC):
                 for name in self.timer.time_sums:
                     self.logger.addScalar(f"Time/{name}", self.timer.lastTime(name), self.step)
 
-                # 获取当前已分配的显存 (GB)
                 allocated = torch.cuda.memory_allocated() / 1024**3
-                # 获取缓存保留的显存 (GB)
                 reserved = torch.cuda.memory_reserved() / 1024**3
 
                 self.logger.addScalar('GPU/Allocated_GB', allocated, self.step)

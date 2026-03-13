@@ -45,7 +45,6 @@ class Trainer(BaseTrainer):
         is_metric_lower_better: bool = True,
         sample_results_freq: int = -1,
         quick_test: bool = False,
-        record_cuda_time: bool = False,
         save_checkpoint_freq: int = -1,
         prefetch_factor: int = 4,
         compile_fn: Optional[Callable]=None,
@@ -75,7 +74,6 @@ class Trainer(BaseTrainer):
             is_metric_lower_better=is_metric_lower_better,
             sample_results_freq=sample_results_freq,
             quick_test=quick_test,
-            record_cuda_time=record_cuda_time,
             save_checkpoint_freq=save_checkpoint_freq,
             prefetch_factor=prefetch_factor,
             compile_fn=compile_fn,
@@ -165,7 +163,6 @@ def demo():
     is_metric_lower_better = True
     sample_results_freq = 1
     quick_test = False
-    record_cuda_time = False
     save_checkpoint_freq = 1000
     prefetch_factor = 4
     compile_fn = demo_compile_fn
@@ -190,7 +187,6 @@ def demo():
         is_metric_lower_better=is_metric_lower_better,
         sample_results_freq=sample_results_freq,
         quick_test=quick_test,
-        record_cuda_time=record_cuda_time,
         save_checkpoint_freq=save_checkpoint_freq,
         prefetch_factor=prefetch_factor,
         compile_fn=compile_fn,
