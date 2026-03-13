@@ -225,8 +225,9 @@ class BaseTrainer(ABC):
 
         self.model: nn.Module
         if not self.createModel():
-            print("[ERROR][BaseTrainer::__init__]")
-            print("\t createModel failed!")
+            if self.is_logger:
+                print("[ERROR][BaseTrainer::__init__]")
+                print("\t createModel failed!")
             exit()
 
         self.ema_loss = None
@@ -235,7 +236,24 @@ class BaseTrainer(ABC):
             self.compile_fn(self.model)
 
         device_type = "cuda" if self.backend == "nccl" else "cpu"
-        self.device_mesh = init_device_mesh(device_type, (dist.get_world_size(),))
+        world_size = dist.get_world_size()
+        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", torch.cuda.device_count()))
+        num_nodes = world_size // local_world_size
+
+        if num_nodes > 1 and world_size % local_world_size == 0:
+            self.device_mesh = init_device_mesh(
+                device_type,
+                (num_nodes, local_world_size),
+                mesh_dim_names=("replicate", "shard"),
+            )
+            if self.is_logger:
+                print("[INFO][BaseTrainer::__init__]")
+                print(f"\t Using 2D HSDP mesh: {num_nodes} nodes x {local_world_size} GPUs/node")
+        else:
+            self.device_mesh = init_device_mesh(device_type, (world_size,))
+            if self.is_logger:
+                print("[INFO][BaseTrainer::__init__]")
+                print(f"\t Using 1D FSDP mesh: {world_size} GPUs")
 
         if self.fsdp_shard_fn is not None:
             self.fsdp_shard_fn(self.model, self.device_mesh, self.mp_policy)
@@ -243,8 +261,9 @@ class BaseTrainer(ABC):
 
         if model_file_path is not None:
             if not self.loadModel(model_file_path, weights_only):
-                print("[ERROR][BaseTrainer::__init__]")
-                print("\t loadModel failed!")
+                if self.is_logger:
+                    print("[ERROR][BaseTrainer::__init__]")
+                    print("\t loadModel failed!")
                 exit()
 
         self._init_ema_shards()
@@ -278,29 +297,40 @@ class BaseTrainer(ABC):
         pass
 
     def loadModel(self, model_file_path: str, weights_only: bool = False) -> bool:
-        if self.is_logger and self.load_model_fn is not None:
-            self.load_model_fn(model_file_path)
+        if self.load_model_fn is not None:
+            if self.is_logger:
+                self.load_model_fn(model_file_path)
+            if dist.is_initialized():
+                dist.barrier()
 
         if not os.path.exists(model_file_path):
-            print("[ERROR][BaseTrainer::loadModel]")
-            print("\t model file not exist!")
-            print("\t model_file_path:", model_file_path)
+            if self.is_logger:
+                print("[ERROR][BaseTrainer::loadModel]")
+                print("\t model file not exist!")
+                print("\t model_file_path:", model_file_path)
             return False
 
         is_rank0 = not dist.is_initialized() or dist.get_rank() == 0
         if is_rank0:
             model_state_dict = torch.load(
-                model_file_path, map_location="cpu", weights_only=False
+                model_file_path, map_location="cpu", weights_only=False, mmap=True,
             )
         else:
             model_state_dict = {}
 
-        if is_rank0 and "model" in model_state_dict.keys():
-            model_sd = model_state_dict["model"]
+        has_model_key = False
+        if is_rank0:
+            has_model_key = "model" in model_state_dict.keys()
+            model_sd = model_state_dict.get("model", {})
         else:
             model_sd = {}
 
-        if is_rank0 and "model" in model_state_dict.keys() or not is_rank0:
+        flag = [has_model_key]
+        if dist.is_initialized():
+            dist.broadcast_object_list(flag, src=0)
+        has_model_key = flag[0]
+
+        if has_model_key:
             try:
                 set_model_state_dict(
                     self.model,
@@ -311,12 +341,13 @@ class BaseTrainer(ABC):
                     ),
                 )
             except Exception as e:
-                print("[WARN][BaseTrainer::loadModel]")
-                print(
-                    "\t model state dict not fully match current model! will train from scratch!"
-                )
-                print("\t  Exception:")
-                print("\t", e)
+                if self.is_logger:
+                    print("[WARN][BaseTrainer::loadModel]")
+                    print(
+                        "\t model state dict not fully match current model! will train from scratch!"
+                    )
+                    print("\t  Exception:")
+                    print("\t", e)
 
         metadata = [None, None, None]
         if is_rank0:
@@ -349,11 +380,12 @@ class BaseTrainer(ABC):
                 if metadata[2] is not None:
                     self.loss_min = metadata[2]
 
-        print("[INFO][BaseTrainer::loadModel]")
-        print("\t model loaded from:", model_file_path)
+        if self.is_logger:
+            print("[INFO][BaseTrainer::loadModel]")
+            print("\t model loaded from:", model_file_path)
 
-        if self.is_logger and self.load_model_fn is not None:
-            removeFile(model_file_path)
+        #if self.is_logger and self.load_model_fn is not None:
+        #    removeFile(model_file_path)
         return True
 
     def initRecords(self) -> bool:
@@ -918,25 +950,29 @@ class BaseTrainer(ABC):
                         )
 
                     if not self.trainEpoch(data_name):
-                        print("[ERROR][BaseTrainer::train]")
-                        print("\t trainEpoch failed!")
+                        if self.is_logger:
+                            print("[ERROR][BaseTrainer::train]")
+                            print("\t trainEpoch failed!")
                         return False
 
                 # self.autoSaveModel("last")
 
                 if not self.evalEpoch():
-                    print("[ERROR][BaseTrainer::train]")
-                    print("\t evalEpoch failed!")
+                    if self.is_logger:
+                        print("[ERROR][BaseTrainer::train]")
+                        print("\t evalEpoch failed!")
                     return False
 
                 if not self.sampleStep():
-                    print("[ERROR][BaseTrainer::train]")
-                    print("\t sampleStep failed!")
+                    if self.is_logger:
+                        print("[ERROR][BaseTrainer::train]")
+                        print("\t sampleStep failed!")
                     return False
 
                 if not self.sampleEMAStep():
-                    print("[ERROR][BaseTrainer::train]")
-                    print("\t sampleEMAStep failed!")
+                    if self.is_logger:
+                        print("[ERROR][BaseTrainer::train]")
+                        print("\t sampleEMAStep failed!")
                     return False
 
                 # Sync all ranks after logger-only operations (eval, sample)
@@ -1038,13 +1074,17 @@ class BaseTrainer(ABC):
             if not skip:
                 self.loss_min = value
 
-        save_model_file_path = None
-        if not skip:
-            save_model_file_path = (
-                self.save_result_folder_path + "model_" + name + ".pth"
-            )
+        skip_flag = [skip]
+        if dist.is_initialized():
+            dist.broadcast_object_list(skip_flag, src=0)
+        skip = skip_flag[0]
 
-        # All ranks must call saveModel for FSDP collective communication
+        if skip:
+            return False
+
+        save_model_file_path = (
+            self.save_result_folder_path + "model_" + name + ".pth"
+        ) if self.is_logger else None
+
         self.saveModel(save_model_file_path)
-
-        return not skip
+        return True
