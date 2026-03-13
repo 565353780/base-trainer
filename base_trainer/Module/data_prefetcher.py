@@ -1,14 +1,33 @@
 import torch
+from typing import Optional, Callable, Dict
 
 
 _EXHAUSTED = object()
 
 
 class DataPrefetcher:
-    def __init__(self, loader, device: str = "cpu"):
+    """Prefetch next batch: H2D transfer + optional GPU preprocessing on a
+    dedicated CUDA stream so that it overlaps with forward/backward on the
+    default stream.
+
+    When *gpu_preprocess_fn* is provided the full pipeline becomes:
+        side stream:  moveTo(GPU, non_blocking) -> gpu_preprocess_fn(batch)
+        main stream:  wait_stream -> use batch for forward/backward
+
+    This hides both H2D latency **and** GPU preprocessing behind the
+    training compute of the current step.
+    """
+
+    def __init__(
+        self,
+        loader,
+        device: str = "cpu",
+        gpu_preprocess_fn: Optional[Callable[[Dict], Optional[Dict]]] = None,
+    ):
         self.loader = iter(loader)
         self.device = torch.device(device)
         self.use_cuda = self.device.type != "cpu"
+        self.gpu_preprocess_fn = gpu_preprocess_fn
         if self.use_cuda:
             self.stream = torch.cuda.Stream()
         self.batch = _EXHAUSTED
@@ -17,6 +36,17 @@ class DataPrefetcher:
     @property
     def exhausted(self) -> bool:
         return self.batch is _EXHAUSTED
+
+    def _move_to_device(self, data):
+        if isinstance(data, torch.Tensor):
+            return data.to(device=self.device, non_blocking=True)
+        elif isinstance(data, dict):
+            return {k: self._move_to_device(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._move_to_device(v) for v in data]
+        elif isinstance(data, tuple):
+            return tuple(self._move_to_device(v) for v in data)
+        return data
 
     def preload(self):
         try:
@@ -28,17 +58,14 @@ class DataPrefetcher:
         if self.batch is None:
             return
 
-        # GPU 模式：异步预取
         if self.use_cuda:
             with torch.cuda.stream(self.stream):
-                for k in self.batch:
-                    if isinstance(self.batch[k], torch.Tensor):
-                        self.batch[k] = self.batch[k].to(device=self.device, non_blocking=True)
-        # CPU 模式：直接加载（同步）
+                self.batch = self._move_to_device(self.batch)
+                if self.gpu_preprocess_fn is not None:
+                    self.batch = self.gpu_preprocess_fn(self.batch)
         else:
-            for k in self.batch:
-                if isinstance(self.batch[k], torch.Tensor):
-                    self.batch[k] = self.batch[k].to(device=self.device)
+            if self.gpu_preprocess_fn is not None:
+                self.batch = self.gpu_preprocess_fn(self.batch)
 
     def next(self):
         if self.batch is _EXHAUSTED:

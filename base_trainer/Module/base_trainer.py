@@ -207,6 +207,7 @@ class BaseTrainer(ABC):
                     batch_size=batch_size,
                     num_workers=num_workers,
                     prefetch_factor=prefetch_factor if num_workers > 0 else None,
+                    persistent_workers=num_workers > 0,
                     collate_fn=collate_fn,
                 )
                 continue
@@ -218,6 +219,7 @@ class BaseTrainer(ABC):
                 batch_size=batch_size,
                 num_workers=num_workers,
                 prefetch_factor=prefetch_factor if num_workers > 0 else None,
+                persistent_workers=num_workers > 0,
                 pin_memory=True,
                 drop_last=True,
                 collate_fn=collate_fn,
@@ -525,13 +527,7 @@ class BaseTrainer(ABC):
     def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
 
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.start('moveTo')
-        data_dict = moveTo(data_dict, self.device)
-        if self.is_logger and self.record_cuda_time:
-            torch.cuda.synchronize()
-            self.timer.pause('moveTo')
+        #data_dict = moveTo(data_dict, self.device)
 
         is_accumulating = self.step % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
@@ -573,15 +569,9 @@ class BaseTrainer(ABC):
             return {}
 
         if not is_accumulating:
-            if self.is_logger and self.record_cuda_time:
-                torch.cuda.synchronize()
-                self.timer.start('optim_step')
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optim.step()
             self.sched.step()
-            if self.is_logger and self.record_cuda_time:
-                torch.cuda.synchronize()
-                self.timer.pause('optim_step')
 
             self.updateEMA()
 
@@ -615,7 +605,10 @@ class BaseTrainer(ABC):
             prefetch_depth=self.prefetch_factor,
         )
 
-        data_prefetcher = DataPrefetcher(async_dataloader, self.device)
+        gpu_preprocess_fn = partial(self.preProcessDataWithGPU, is_training=True)
+        data_prefetcher = DataPrefetcher(
+            async_dataloader, self.device, gpu_preprocess_fn=gpu_preprocess_fn,
+        )
 
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
@@ -647,21 +640,6 @@ class BaseTrainer(ABC):
                 for key, value in data_dict.items():
                     if key[:5] in ['Time_']:
                         self.timer.addTime(key[5:], value.mean().item())
-
-                if self.record_cuda_time:
-                    torch.cuda.synchronize()
-                    self.timer.start('preProcessDataWithGPU')
-                data_dict = self.preProcessDataWithGPU(data_dict, is_training=True)
-                if self.record_cuda_time:
-                    torch.cuda.synchronize()
-                    self.timer.pause('preProcessDataWithGPU')
-            else:
-                data_dict = self.preProcessDataWithGPU(data_dict, is_training=True)
-
-            if data_dict is None:
-                if self.is_logger:
-                    pbar.update(1)
-                continue
 
             train_loss_dict = self.trainStep(data_dict)
 
