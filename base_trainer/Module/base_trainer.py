@@ -530,21 +530,6 @@ class BaseTrainer(ABC):
         """
         return data_dict
 
-    def _sync_device(self) -> None:
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        return
-
-    def _measure_serial_time(self, name: str, fn: Callable):
-        self._sync_device()
-        if self.is_logger:
-            self.timer.start(name)
-        result = fn()
-        self._sync_device()
-        if self.is_logger:
-            self.timer.pause(name)
-        return result
-
     @abstractmethod
     def getLossDict(self, data_dict: dict, result_dict: dict) -> dict:
         """
@@ -558,23 +543,18 @@ class BaseTrainer(ABC):
     def trainStep(self, data_dict: dict) -> dict:
         self.model.train()
 
-        #data_dict = moveTo(data_dict, self.device)
-
         is_accumulating = self.step % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
 
-        result_dict = self._measure_serial_time(
-            'forward',
-            lambda: self.model(data_dict),
-        )
+        if self.is_logger:
+            self.timer.startCuda('forward')
+        result_dict = self.model(data_dict)
+        if self.is_logger:
+            self.timer.pauseCuda('forward')
 
-        loss_dict = self._measure_serial_time(
-            'loss',
-            lambda: self.getLossDict(
-                data_dict,
-                self.postProcessData(data_dict, result_dict, True),
-            ),
-        )
+        result_dict = self.postProcessData(data_dict, result_dict, True)
+
+        loss_dict = self.getLossDict(data_dict, result_dict)
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
@@ -582,30 +562,34 @@ class BaseTrainer(ABC):
         loss = loss_dict["Loss"]
         accum_loss = loss / self.accum_iter
 
-        self._measure_serial_time(
-            'backward',
-            lambda: accum_loss.backward(),
-        )
+        if self.is_logger:
+            self.timer.startCuda('backward')
+        accum_loss.backward()
+        if self.is_logger:
+            self.timer.pauseCuda('backward')
 
-        grad_is_finite = self._measure_serial_time(
-            'grad_check',
-            lambda: check_and_replace_nan_in_grad(self.model),
-        )
+        if self.is_logger:
+            self.timer.start('grad_check')
+        grad_is_finite = check_and_replace_nan_in_grad(self.model)
+        if self.is_logger:
+            self.timer.pause('grad_check')
+
         if not grad_is_finite:
-            print(f"[WARN] step {self.step}: grad NaN detected, skipping update.")
+            print("[WARN][BaseTrainer::trainStep]")
+            print(f"\t step {self.step}: grad NaN detected, skipping update.")
             self.optim.zero_grad(set_to_none=True)
             return {}
 
         if not is_accumulating:
-            def _optimizer_step():
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                self.optim.step()
-                self.sched.step()
-                self.updateEMA()
-                self.optim.zero_grad(set_to_none=True)
-                return True
-
-            self._measure_serial_time('optimizer', _optimizer_step)
+            if self.is_logger:
+                self.timer.start('optimizer')
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optim.step()
+            self.sched.step()
+            self.updateEMA()
+            self.optim.zero_grad(set_to_none=True)
+            if self.is_logger:
+                self.timer.pause('optimizer')
 
         loss_item_dict = {}
         for key, item in loss_dict.items():
@@ -662,10 +646,11 @@ class BaseTrainer(ABC):
                     pbar.update(1)
                 continue
 
-            data_dict = self._measure_serial_time(
-                'gpu_preprocess',
-                lambda: gpu_preprocess_fn(data_dict),
-            )
+            if self.is_logger:
+                self.timer.startCuda('preProcessDataWithGPU')
+            data_dict = gpu_preprocess_fn(data_dict)
+            if self.is_logger:
+                self.timer.pauseCuda('preProcessDataWithGPU')
 
             if data_dict is None:
                 if self.is_logger:
@@ -708,6 +693,7 @@ class BaseTrainer(ABC):
                 self.loss_dict_list = []
 
             if self.is_logger:
+                self.timer.collectCudaTimes()
                 for name in self.timer.time_sums:
                     self.logger.addScalar(f"Time/{name}", self.timer.lastTime(name), self.step)
 

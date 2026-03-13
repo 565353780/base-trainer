@@ -66,16 +66,35 @@ class Timer(object):
         self._cuda_pending.setdefault(name, []).append((start_evt, end_evt))
         return True
 
-    def collectCudaTimes(self) -> None:
-        """Call once per step **after** torch.cuda.synchronize() to harvest all
-        pending CUDA event pairs into the normal time_sums / last_durations."""
-        for name, pairs in self._cuda_pending.items():
+    def collectCudaTimes(self, sync: bool = False) -> None:
+        """Harvest completed CUDA event pairs into time_sums / last_durations.
+
+        When sync=False (default), only collects pairs whose end event has
+        already completed (checked via event.query()), leaving unfinished
+        pairs in the pending queue for the next call. This avoids blocking
+        the GPU pipeline.
+
+        When sync=True, calls torch.cuda.synchronize() first so that all
+        pending pairs are guaranteed to be ready.
+        """
+        if sync:
+            torch.cuda.synchronize()
+
+        for name in list(self._cuda_pending.keys()):
+            pairs = self._cuda_pending[name]
+            remaining = []
             for start_evt, end_evt in pairs:
-                duration = start_evt.elapsed_time(end_evt) / 1000.0
-                self.time_sums[name] += duration
-                self.last_durations[name] = duration
-                self.step_counts[name] = self.step_counts.get(name, 0) + 1
-        self._cuda_pending.clear()
+                if end_evt.query():
+                    duration = start_evt.elapsed_time(end_evt) / 1000.0
+                    self.time_sums[name] += duration
+                    self.last_durations[name] = duration
+                    self.step_counts[name] = self.step_counts.get(name, 0) + 1
+                else:
+                    remaining.append((start_evt, end_evt))
+            if remaining:
+                self._cuda_pending[name] = remaining
+            else:
+                del self._cuda_pending[name]
 
     def addTime(self, name: str, duration: float) -> bool:
         """Directly add a measured duration without using start/pause."""
