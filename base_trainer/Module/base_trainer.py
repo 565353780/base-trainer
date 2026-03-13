@@ -69,24 +69,24 @@ def setup_distributed(backend: Optional[str] = None):
     return node_rank, local_rank, device
 
 def check_and_replace_nan_in_grad(model):
-    """Check for NaN/Inf in local FSDP-sharded gradients with a single fused kernel.
+    """Check for NaN/Inf in local FSDP-sharded gradients without extra memory.
 
-    With PyTorch 2 fully_shard, each rank already holds only its own shard of
-    param.grad after backward — no all-gather is triggered by reading .grad.
-    We flatten all grad shards into one contiguous view and run a single
-    torch.isfinite().all() to avoid a Python-level per-parameter loop.
+    Instead of flattening all grads into one contiguous tensor (which doubles
+    peak memory), we check each grad in-place and short-circuit on the first
+    non-finite value.
 
     An all-reduce (MAX) across ranks ensures every rank takes the same branch.
 
     Returns True if gradients are clean on ALL ranks, False otherwise.
     """
-    grads = [p.grad for p in model.parameters() if p.grad is not None]
-    if grads:
-        flat = torch._utils._flatten_dense_tensors(grads)
-        finite = torch.isfinite(flat).all()
-        has_nan = torch.where(finite, torch.zeros(1, device=flat.device), torch.ones(1, device=flat.device))
-    else:
-        has_nan = torch.zeros(1, device=next(model.parameters()).device)
+    device = next(model.parameters()).device
+    found_bad = False
+    for p in model.parameters():
+        if p.grad is not None:
+            if not torch.isfinite(p.grad).all().item():
+                found_bad = True
+                break
+    has_nan = torch.ones(1, device=device) if found_bad else torch.zeros(1, device=device)
 
     if dist.is_initialized():
         dist.all_reduce(has_nan, op=dist.ReduceOp.MAX)
@@ -130,6 +130,7 @@ class BaseTrainer(ABC):
         batch_size: int = 4,
         accum_iter: int = 1,
         num_workers: int = 4,
+        prefetch_factor: int = 2,
         model_file_path: Optional[str] = None,
         weights_only: bool = False,
         warm_step_num: int = 2000,
@@ -146,7 +147,6 @@ class BaseTrainer(ABC):
         sample_results_freq: int = -1,
         quick_test: bool = False,
         save_checkpoint_freq: int = -1,
-        prefetch_factor: int = 2,
         fsdp_shard_fn: Optional[Callable] = default_fsdp_shard_fn,
         compile_fn: Optional[Callable] = None,
         mp_policy: Optional[MixedPrecisionPolicy] = MixedPrecisionPolicy(
@@ -162,6 +162,7 @@ class BaseTrainer(ABC):
         self.batch_size = batch_size
         self.accum_iter = accum_iter
         self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor
 
         if torch.cuda.is_bf16_supported():
             self.dtype = torch.bfloat16
@@ -202,7 +203,6 @@ class BaseTrainer(ABC):
         self.save_model_fn = save_model_fn
 
         self.save_checkpoint_freq = save_checkpoint_freq
-        self.prefetch_factor = prefetch_factor
 
         self.step = 0
         self.epoch = 0
@@ -572,7 +572,6 @@ class BaseTrainer(ABC):
         if self.is_logger:
             self.timer.pauseCuda('backward')
 
-        torch.cuda.synchronize()
         if self.is_logger:
             self.timer.startCuda('grad_check')
         grad_is_finite = check_and_replace_nan_in_grad(self.model)

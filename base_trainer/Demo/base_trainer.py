@@ -30,6 +30,7 @@ class Trainer(BaseTrainer):
         batch_size: int = 5,
         accum_iter: int = 10,
         num_workers: int = 16,
+        prefetch_factor: int = 4,
         model_file_path: Union[str, None] = None,
         weights_only: bool = False,
         warm_step_num: int = 2000,
@@ -46,7 +47,6 @@ class Trainer(BaseTrainer):
         sample_results_freq: int = -1,
         quick_test: bool = False,
         save_checkpoint_freq: int = -1,
-        prefetch_factor: int = 4,
         compile_fn: Optional[Callable]=None,
         load_model_fn: Optional[Callable]=None,
         save_model_fn: Optional[Callable]=None,
@@ -59,6 +59,7 @@ class Trainer(BaseTrainer):
             batch_size=batch_size,
             accum_iter=accum_iter,
             num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
             model_file_path=model_file_path,
             weights_only=weights_only,
             warm_step_num=warm_step_num,
@@ -75,7 +76,6 @@ class Trainer(BaseTrainer):
             sample_results_freq=sample_results_freq,
             quick_test=quick_test,
             save_checkpoint_freq=save_checkpoint_freq,
-            prefetch_factor=prefetch_factor,
             compile_fn=compile_fn,
             load_model_fn=load_model_fn,
             save_model_fn=save_model_fn,
@@ -145,6 +145,7 @@ def demo():
     batch_size = 8
     accum_iter = 20
     num_workers = 16
+    prefetch_factor = 4
     model_file_path = "../../output/20241225_15:14:36/model_last.pth".replace(
         "../../", "./"
     )
@@ -164,7 +165,6 @@ def demo():
     sample_results_freq = 1
     quick_test = False
     save_checkpoint_freq = 1000
-    prefetch_factor = 4
     compile_fn = demo_compile_fn
     save_model_fn = None
 
@@ -172,6 +172,7 @@ def demo():
         batch_size=batch_size,
         accum_iter=accum_iter,
         num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
         model_file_path=model_file_path,
         weights_only=weights_only,
         warm_step_num=warm_step_num,
@@ -188,7 +189,6 @@ def demo():
         sample_results_freq=sample_results_freq,
         quick_test=quick_test,
         save_checkpoint_freq=save_checkpoint_freq,
-        prefetch_factor=prefetch_factor,
         compile_fn=compile_fn,
         save_model_fn=save_model_fn,
     )
