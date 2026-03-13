@@ -1,4 +1,5 @@
 import torch
+from time import time as _wall_time
 from typing import Optional, Callable, Dict
 
 
@@ -6,16 +7,15 @@ _EXHAUSTED = object()
 
 
 class DataPrefetcher:
-    """Prefetch next batch: H2D transfer + optional GPU preprocessing on a
-    dedicated CUDA stream so that it overlaps with forward/backward on the
-    default stream.
+    """Prefetch next batch with H2D transfer on a dedicated CUDA stream.
 
-    When *gpu_preprocess_fn* is provided the full pipeline becomes:
-        side stream:  moveTo(GPU, non_blocking) -> gpu_preprocess_fn(batch)
-        main stream:  wait_stream -> use batch for forward/backward
-
-    This hides both H2D latency **and** GPU preprocessing behind the
-    training compute of the current step.
+    Timing breakdown (available via ``last_timings`` after each ``next()``):
+      * **loader_wait** – wall-clock time blocked on the underlying iterator
+        (AsyncDataLoader / DataLoader).  Dominated by remote I/O or CPU
+        preprocessing when the prefetch queue is drained.
+      * **h2d_transfer** – wall-clock time for the synchronous H2D copy
+        (measured by recording CUDA events on the side stream and
+        synchronizing).
     """
 
     def __init__(
@@ -31,6 +31,9 @@ class DataPrefetcher:
         if self.use_cuda:
             self.stream = torch.cuda.Stream()
         self.batch = _EXHAUSTED
+
+        self.last_timings: Dict[str, float] = {}
+
         self.preload()
 
     @property
@@ -49,23 +52,37 @@ class DataPrefetcher:
         return data
 
     def preload(self):
+        t0 = _wall_time()
         try:
             self.batch = next(self.loader)
         except StopIteration:
             self.batch = _EXHAUSTED
+            self.last_timings['loader_wait'] = _wall_time() - t0
+            self.last_timings['h2d_transfer'] = 0.0
             return
+        loader_wait = _wall_time() - t0
 
         if self.batch is None:
+            self.last_timings['loader_wait'] = loader_wait
+            self.last_timings['h2d_transfer'] = 0.0
             return
 
         if self.use_cuda:
             with torch.cuda.stream(self.stream):
+                h2d_t0 = _wall_time()
                 self.batch = self._move_to_device(self.batch)
+                self.stream.synchronize()
+                h2d_time = _wall_time() - h2d_t0
+
                 if self.gpu_preprocess_fn is not None:
                     self.batch = self.gpu_preprocess_fn(self.batch)
         else:
+            h2d_time = 0.0
             if self.gpu_preprocess_fn is not None:
                 self.batch = self.gpu_preprocess_fn(self.batch)
+
+        self.last_timings['loader_wait'] = loader_wait
+        self.last_timings['h2d_transfer'] = h2d_time
 
     def next(self):
         if self.batch is _EXHAUSTED:

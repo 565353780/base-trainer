@@ -1,10 +1,8 @@
 import os
-import re
 import torch
 import threading
 import numpy as np
 import torch.distributed as dist
-from time import time as _wall_time
 
 from torch import nn
 from tqdm import tqdm
@@ -425,14 +423,11 @@ class BaseTrainer(ABC):
             self.save_log_folder_path = "./logs/" + current_time + "/"
 
         # 若路径中不包含 timestamp（格式见 Method/time.py），则追加 current_time + "/"
-        timestamp_pattern = r"\d{8}_\d{2}:\d{2}:\d{2}"
         if self.save_result_folder_path is not None:
-            result_has_ts = self.save_result_folder_path and re.search(timestamp_pattern, self.save_result_folder_path)
-            if not result_has_ts:
+            if os.path.exists(self.save_result_folder_path):
                 self.save_result_folder_path = self.save_result_folder_path + current_time + "/"
         if self.save_log_folder_path is not None:
-            log_has_ts = self.save_log_folder_path and re.search(timestamp_pattern, self.save_log_folder_path)
-            if not log_has_ts:
+            if os.path.exists(self.save_log_folder_path):
                 self.save_log_folder_path = self.save_log_folder_path + current_time + "/"
 
         if self.save_result_folder_path is not None:
@@ -537,6 +532,21 @@ class BaseTrainer(ABC):
         """
         return data_dict
 
+    def _sync_device(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return
+
+    def _measure_serial_time(self, name: str, fn: Callable):
+        self._sync_device()
+        if self.is_logger:
+            self.timer.start(name)
+        result = fn()
+        self._sync_device()
+        if self.is_logger:
+            self.timer.pause(name)
+        return result
+
     @abstractmethod
     def getLossDict(self, data_dict: dict, result_dict: dict) -> dict:
         """
@@ -555,18 +565,18 @@ class BaseTrainer(ABC):
         is_accumulating = self.step % self.accum_iter != 0
         self.model.set_requires_gradient_sync(not is_accumulating)
 
-        if self.is_logger:
-            self.timer.startCuda('forward')
-        result_dict = self.model(data_dict)
-        if self.is_logger:
-            self.timer.pauseCuda('forward')
+        result_dict = self._measure_serial_time(
+            'forward',
+            lambda: self.model(data_dict),
+        )
 
-        if self.is_logger:
-            self.timer.startCuda('loss_compute')
-        result_dict = self.postProcessData(data_dict, result_dict, True)
-        loss_dict = self.getLossDict(data_dict, result_dict)
-        if self.is_logger:
-            self.timer.pauseCuda('loss_compute')
+        loss_dict = self._measure_serial_time(
+            'loss',
+            lambda: self.getLossDict(
+                data_dict,
+                self.postProcessData(data_dict, result_dict, True),
+            ),
+        )
 
         if "Loss" not in loss_dict:
             raise RuntimeError("Loss not found in loss_dict")
@@ -574,25 +584,30 @@ class BaseTrainer(ABC):
         loss = loss_dict["Loss"]
         accum_loss = loss / self.accum_iter
 
-        if self.is_logger:
-            self.timer.startCuda('backward')
-        accum_loss.backward()
-        if self.is_logger:
-            self.timer.pauseCuda('backward')
+        self._measure_serial_time(
+            'backward',
+            lambda: accum_loss.backward(),
+        )
 
-        if not check_and_replace_nan_in_grad(self.model):
+        grad_is_finite = self._measure_serial_time(
+            'grad_check',
+            lambda: check_and_replace_nan_in_grad(self.model),
+        )
+        if not grad_is_finite:
             print(f"[WARN] step {self.step}: grad NaN detected, skipping update.")
             self.optim.zero_grad(set_to_none=True)
             return {}
 
         if not is_accumulating:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optim.step()
-            self.sched.step()
+            def _optimizer_step():
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.optim.step()
+                self.sched.step()
+                self.updateEMA()
+                self.optim.zero_grad(set_to_none=True)
+                return True
 
-            self.updateEMA()
-
-            self.optim.zero_grad(set_to_none=True)
+            self._measure_serial_time('optimizer', _optimizer_step)
 
         loss_item_dict = {}
         for key, item in loss_dict.items():
@@ -623,16 +638,14 @@ class BaseTrainer(ABC):
         )
 
         gpu_preprocess_fn = partial(self.preProcessDataWithGPU, is_training=True)
-        data_prefetcher = DataPrefetcher(
-            async_dataloader, self.device, gpu_preprocess_fn=gpu_preprocess_fn,
-        )
+        data_prefetcher = DataPrefetcher(async_dataloader, self.device)
 
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
-        _step_t0 = _wall_time()
+            self.timer.start('step')
         while not data_prefetcher.exhausted:
             if self.is_logger:
-                _prefetch_t0 = _wall_time()
+                self.timer.start('data_prefetch')
             try:
                 data_dict = data_prefetcher.next()
             except:
@@ -642,7 +655,19 @@ class BaseTrainer(ABC):
                 )
                 break
             if self.is_logger:
-                self.timer.addTime('data_prefetch', _wall_time() - _prefetch_t0)
+                self.timer.pause('data_prefetch')
+                for _tk, _tv in data_prefetcher.last_timings.items():
+                    self.timer.addTime(_tk, _tv)
+
+            if data_dict is None:
+                if self.is_logger:
+                    pbar.update(1)
+                continue
+
+            data_dict = self._measure_serial_time(
+                'gpu_preprocess',
+                lambda: gpu_preprocess_fn(data_dict),
+            )
 
             if data_dict is None:
                 if self.is_logger:
@@ -657,10 +682,7 @@ class BaseTrainer(ABC):
             train_loss_dict = self.trainStep(data_dict)
 
             if self.is_logger:
-                torch.cuda.synchronize()
-                self.timer.collectCudaTimes()
-                self.timer.addTime('step_wall', _wall_time() - _step_t0)
-                _step_t0 = _wall_time()
+                self.timer.pause('step')
 
             self.loss_dict_list.append(train_loss_dict)
 

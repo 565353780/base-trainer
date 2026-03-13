@@ -1,7 +1,7 @@
-from time import time, sleep
-from typing import Optional
-
 import torch
+
+from typing import Optional
+from time import time, sleep
 
 
 class Timer(object):
@@ -17,10 +17,8 @@ class Timer(object):
         return
 
     def start(self, name: str) -> bool:
-        if name in self.start_times and self.start_times[name] is not None:
-            return True
-
         self.start_times[name] = time()
+
         if name not in self.time_sums:
             self.time_sums[name] = 0.0
             self.step_counts[name] = 0
@@ -47,6 +45,7 @@ class Timer(object):
         else:
             evt.record()
         self._cuda_start_events[name] = evt
+
         if name not in self.time_sums:
             self.time_sums[name] = 0.0
             self.step_counts[name] = 0
@@ -57,6 +56,7 @@ class Timer(object):
         """Record an end event and stash the (start, end) pair for later collection."""
         if name not in self._cuda_start_events:
             return True
+
         end_evt = torch.cuda.Event(enable_timing=True)
         if stream is not None:
             end_evt.record(stream)
