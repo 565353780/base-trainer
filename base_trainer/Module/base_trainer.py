@@ -526,6 +526,10 @@ class BaseTrainer(ABC):
         """
         return data_dict
 
+    @torch.no_grad()
+    def preProcessDataWithoutGrad(self, data_dict: dict, is_training: bool = True) -> Optional[Dict]:
+        return self.preProcessData(data_dict, is_training)
+
     def preProcessDataWithGPU(self, data_dict: dict, is_training: bool = True) -> Optional[Dict]:
         """
         if is_training:
@@ -533,6 +537,10 @@ class BaseTrainer(ABC):
             return data_dict
         """
         return data_dict
+
+    @torch.no_grad()
+    def preProcessDataWithGPUWithoutGrad(self, data_dict: dict, is_training: bool = True) -> Optional[Dict]:
+        return self.preProcessDataWithGPU(data_dict, is_training)
 
     @abstractmethod
     def getLossDict(self, data_dict: dict, result_dict: dict) -> dict:
@@ -623,7 +631,7 @@ class BaseTrainer(ABC):
             prefetch_depth=self.prefetch_factor,
         )
 
-        gpu_preprocess_fn = partial(self.preProcessDataWithGPU, is_training=True)
+        gpu_preprocess_fn = partial(self.preProcessDataWithGPUWithoutGrad, is_training=True)
         data_prefetcher = DataPrefetcher(async_dataloader, self.device)
 
         if self.is_logger:
@@ -785,7 +793,7 @@ class BaseTrainer(ABC):
 
             async_dataloader = AsyncDataLoader(
                 dataloader,
-                partial(self.preProcessData, is_training=False),
+                partial(self.preProcessDataWithoutGrad, is_training=False),
                 max_workers=self.num_workers,
                 prefetch_depth=self.prefetch_factor,
             )
@@ -798,7 +806,7 @@ class BaseTrainer(ABC):
             for data_dict in async_dataloader:
                 if data_dict is not None:
                     data_dict = moveTo(data_dict, self.device)
-                    data_dict = self.preProcessDataWithGPU(data_dict, is_training=False)
+                    data_dict = self.preProcessDataWithGPUWithoutGrad(data_dict, is_training=False)
 
                 if data_dict is None:
                     pbar.update(1)
