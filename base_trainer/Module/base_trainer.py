@@ -632,7 +632,7 @@ class BaseTrainer(ABC):
         )
 
         gpu_preprocess_fn = partial(self.preProcessDataWithGPUWithoutGrad, is_training=True)
-        data_prefetcher = DataPrefetcher(async_dataloader, self.device)
+        data_prefetcher = DataPrefetcher(async_dataloader, self.device, gpu_preprocess_fn)
 
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
@@ -649,17 +649,6 @@ class BaseTrainer(ABC):
                     "\t call next for DataPrefetcher failed! will early stop this training epoch!"
                 )
                 break
-
-            if data_dict is None:
-                if self.is_logger:
-                    pbar.update(1)
-                continue
-
-            if self.is_logger:
-                self.timer.startCuda('preProcessDataWithGPU')
-            data_dict = gpu_preprocess_fn(data_dict)
-            if self.is_logger:
-                self.timer.pauseCuda('preProcessDataWithGPU')
 
             if data_dict is None:
                 if self.is_logger:
