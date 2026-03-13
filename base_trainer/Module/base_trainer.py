@@ -69,30 +69,34 @@ def setup_distributed(backend: Optional[str] = None):
     return node_rank, local_rank, device
 
 def check_and_replace_nan_in_grad(model):
-    """Check for NaN/Inf gradients and ensure ALL ranks agree on the result.
+    """Check for NaN/Inf in local FSDP-sharded gradients with a single fused kernel.
 
-    Each rank computes a local flag from its own FSDP shard gradients, then
-    an all-reduce ensures every rank takes the same branch (skip or update).
-    Without this synchronization, some ranks may skip optim.step while others
-    proceed, causing FSDP weight divergence and eventual NCCL timeout.
+    With PyTorch 2 fully_shard, each rank already holds only its own shard of
+    param.grad after backward — no all-gather is triggered by reading .grad.
+    We flatten all grad shards into one contiguous view and run a single
+    torch.isfinite().all() to avoid a Python-level per-parameter loop.
+
+    An all-reduce (MAX) across ranks ensures every rank takes the same branch.
 
     Returns True if gradients are clean on ALL ranks, False otherwise.
     """
-    has_nan = torch.zeros(1, device=next(model.parameters()).device)
-    for param in model.parameters():
-        if param.grad is not None:
-            if not torch.isfinite(param.grad).all():
-                has_nan.fill_(1.0)
-                break
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    if grads:
+        flat = torch._utils._flatten_dense_tensors(grads)
+        finite = torch.isfinite(flat).all()
+        has_nan = torch.where(finite, torch.zeros(1, device=flat.device), torch.ones(1, device=flat.device))
+    else:
+        has_nan = torch.zeros(1, device=next(model.parameters()).device)
 
     if dist.is_initialized():
         dist.all_reduce(has_nan, op=dist.ReduceOp.MAX)
 
     if has_nan.item() > 0:
-        print(f"[WARN] NaN/Inf detected in gradient (rank {dist.get_rank() if dist.is_initialized() else 0}), zeroing all grads.")
-        for param in model.parameters():
-            if param.grad is not None:
-                param.grad.zero_()
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        print(f"[WARN] NaN/Inf detected in gradient (rank {rank}), zeroing all grads.")
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad.zero_()
         return False
     return True
 
@@ -123,9 +127,9 @@ def _check_and_abort(success: bool, msg: str = "") -> None:
 class BaseTrainer(ABC):
     def __init__(
         self,
-        batch_size: int = 32,
+        batch_size: int = 4,
         accum_iter: int = 1,
-        num_workers: int = 16,
+        num_workers: int = 4,
         model_file_path: Optional[str] = None,
         weights_only: bool = False,
         warm_step_num: int = 2000,
@@ -142,7 +146,7 @@ class BaseTrainer(ABC):
         sample_results_freq: int = -1,
         quick_test: bool = False,
         save_checkpoint_freq: int = -1,
-        prefetch_factor: int = 4,
+        prefetch_factor: int = 2,
         fsdp_shard_fn: Optional[Callable] = default_fsdp_shard_fn,
         compile_fn: Optional[Callable] = None,
         mp_policy: Optional[MixedPrecisionPolicy] = MixedPrecisionPolicy(
@@ -568,11 +572,12 @@ class BaseTrainer(ABC):
         if self.is_logger:
             self.timer.pauseCuda('backward')
 
+        torch.cuda.synchronize()
         if self.is_logger:
-            self.timer.start('grad_check')
+            self.timer.startCuda('grad_check')
         grad_is_finite = check_and_replace_nan_in_grad(self.model)
         if self.is_logger:
-            self.timer.pause('grad_check')
+            self.timer.pauseCuda('grad_check')
 
         if not grad_is_finite:
             print("[WARN][BaseTrainer::trainStep]")
@@ -624,8 +629,11 @@ class BaseTrainer(ABC):
 
         if self.is_logger:
             pbar = tqdm(total=len(dataloader))
-            self.timer.start('step')
+
         while not data_prefetcher.exhausted:
+            if self.is_logger:
+                self.timer.start('step')
+
             if self.is_logger:
                 self.timer.start('data_prefetch')
             try:
@@ -638,8 +646,6 @@ class BaseTrainer(ABC):
                 break
             if self.is_logger:
                 self.timer.pause('data_prefetch')
-                for _tk, _tv in data_prefetcher.last_timings.items():
-                    self.timer.addTime(_tk, _tv)
 
             if data_dict is None:
                 if self.is_logger:
