@@ -423,12 +423,10 @@ class BaseTrainer(ABC):
             self.save_log_folder_path = "./logs/" + current_time + "/"
 
         # 若路径中不包含 timestamp（格式见 Method/time.py），则追加 current_time + "/"
-        if self.save_result_folder_path is not None:
-            if os.path.exists(self.save_result_folder_path):
-                self.save_result_folder_path = self.save_result_folder_path + current_time + "/"
-        if self.save_log_folder_path is not None:
-            if os.path.exists(self.save_log_folder_path):
-                self.save_log_folder_path = self.save_log_folder_path + current_time + "/"
+        if self.save_result_folder_path is not None and os.path.exists(self.save_result_folder_path):
+            self.save_result_folder_path = self.save_result_folder_path + current_time + "/"
+        if self.save_log_folder_path is not None and os.path.exists(self.save_log_folder_path):
+            self.save_log_folder_path = self.save_log_folder_path + current_time + "/"
 
         if self.save_result_folder_path is not None:
             os.makedirs(self.save_result_folder_path, exist_ok=True)
