@@ -54,10 +54,18 @@ class DataPrefetcher:
                 self.batch = self._move_to_device(self.batch)
 
                 if self.gpu_preprocess_fn is not None:
-                    self.batch = self.gpu_preprocess_fn(self.batch)
+                    try:
+                        self.batch = self.gpu_preprocess_fn(self.batch)
+                    except Exception as e:
+                        print(f'[WARN][DataPrefetcher::preload] gpu_preprocess_fn failed: {e}')
+                        self.batch = None
         else:
             if self.gpu_preprocess_fn is not None:
-                self.batch = self.gpu_preprocess_fn(self.batch)
+                try:
+                    self.batch = self.gpu_preprocess_fn(self.batch)
+                except Exception as e:
+                    print(f'[WARN][DataPrefetcher::preload] gpu_preprocess_fn failed: {e}')
+                    self.batch = None
 
     def next(self):
         if self.batch is _EXHAUSTED:
