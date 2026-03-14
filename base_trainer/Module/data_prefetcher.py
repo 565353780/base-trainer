@@ -57,14 +57,16 @@ class DataPrefetcher:
                     try:
                         self.batch = self.gpu_preprocess_fn(self.batch)
                     except Exception as e:
-                        print(f'[WARN][DataPrefetcher::preload] gpu_preprocess_fn failed: {e}')
+                        print('[WARN][DataPrefetcher::preload]')
+                        print(f'\t gpu_preprocess_fn failed: {e}')
                         self.batch = None
         else:
             if self.gpu_preprocess_fn is not None:
                 try:
                     self.batch = self.gpu_preprocess_fn(self.batch)
                 except Exception as e:
-                    print(f'[WARN][DataPrefetcher::preload] gpu_preprocess_fn failed: {e}')
+                    print('[WARN][DataPrefetcher::preload]')
+                    print(f'\t gpu_preprocess_fn failed: {e}')
                     self.batch = None
 
     def next(self):
